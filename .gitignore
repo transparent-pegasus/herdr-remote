@@ -1,10 +1,12 @@
 /target
 CLAUDE.local.md
+docs/todo.md
 node_modules/
 web/dist/
 web/.astro/
 .env
 .tmp/
+.worktrees/
 .wrangler/
 .herdrpowers/
 .codegraph/
