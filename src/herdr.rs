@@ -28,14 +28,13 @@ fn socket_path() -> String {
 pub async fn call(method: &str, params: Value) -> Result<Value> {
     // A herdr that accepts the connection and then never answers must not pin
     // an axum task and a socket descriptor forever.
-    timeout(TIMEOUT, exchange(method, params))
+    timeout(TIMEOUT, exchange(&socket_path(), method, params))
         .await
         .with_context(|| format!("herdr {method} timed out after {TIMEOUT:?}"))?
 }
 
-async fn exchange(method: &str, params: Value) -> Result<Value> {
-    let path = socket_path();
-    let stream = UnixStream::connect(&path)
+async fn exchange(path: &str, method: &str, params: Value) -> Result<Value> {
+    let stream = UnixStream::connect(path)
         .await
         .with_context(|| format!("connect to herdr socket at {path}"))?;
     let mut conn = BufReader::new(stream);
@@ -172,7 +171,7 @@ pub async fn session() -> Result<Session> {
 
 /// `truncated` means herdr had more scrollback than `lines` asked for, which is
 /// what lets the phone offer to reach further back.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 pub struct Output {
     pub text: String,
     pub truncated: bool,
@@ -261,6 +260,82 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::net::UnixListener;
+
+    /// A herdr that accepts one connection, reads the request, replies with
+    /// fixed bytes, hangs up, and removes its socket.
+    fn fake_herdr(reply: &'static [u8]) -> String {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("herdr-remote-test-{}-{n}.sock", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let socket = path.clone();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            stream.write_all(reply).await.unwrap();
+            drop(stream);
+            let _ = std::fs::remove_file(&socket);
+        });
+        path
+    }
+
+    /// exchange() has no timeout of its own (call() adds the 10 s one), so cap
+    /// the probe: a broken fake must fail the test, not hang the suite.
+    async fn probe(path: &str) -> Result<Value> {
+        timeout(Duration::from_secs(2), exchange(path, "ping", json!({})))
+            .await
+            .expect("probe outlived its 2 s cap")
+    }
+
+    #[tokio::test]
+    async fn a_clean_reply_returns_its_result() {
+        let path = fake_herdr(b"{\"id\":\"herdr-remote\",\"result\":{\"type\":\"ok\"}}\n");
+        let result = probe(&path).await.unwrap();
+        assert_eq!(result["type"], "ok");
+    }
+
+    #[tokio::test]
+    async fn eof_before_any_reply_is_an_error() {
+        let path = fake_herdr(b"");
+        let error = probe(&path).await.unwrap_err();
+        assert!(error.to_string().contains("closed before replying"));
+    }
+
+    #[tokio::test]
+    async fn a_frame_without_its_newline_is_truncated() {
+        let path = fake_herdr(b"{\"id\":\"herdr-remote\",\"result\":{}}");
+        let error = probe(&path).await.unwrap_err();
+        assert!(error.to_string().contains("truncated"));
+    }
+
+    #[tokio::test]
+    async fn a_herdr_error_is_surfaced() {
+        let path =
+            fake_herdr(b"{\"id\":\"herdr-remote\",\"error\":{\"code\":\"x\",\"message\":\"y\"}}\n");
+        let error = probe(&path).await.unwrap_err();
+        assert!(error.to_string().contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn a_reply_with_a_foreign_id_is_rejected() {
+        let path = fake_herdr(b"{\"id\":\"someone-else\",\"result\":{}}\n");
+        let error = probe(&path).await.unwrap_err();
+        assert!(error.to_string().contains("foreign id"));
+    }
+
+    #[tokio::test]
+    async fn a_reply_missing_its_result_is_rejected() {
+        let path = fake_herdr(b"{\"id\":\"herdr-remote\"}\n");
+        let error = probe(&path).await.unwrap_err();
+        assert!(error.to_string().contains("no result"));
     }
 
     #[test]
