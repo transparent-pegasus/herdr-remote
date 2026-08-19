@@ -195,8 +195,9 @@ pub async fn read(pane_id: &str, lines: u32, source: &str) -> Result<Output> {
     Ok(serde_json::from_value(read.clone())?)
 }
 
-/// A bare keypress for the two keys a prompt cannot express: esc to stop a
-/// turn, enter to answer a question the agent is already showing.
+/// A bare keypress for what a prompt cannot express: esc to stop a turn, enter
+/// to answer a question the agent is already showing, up and down to move the
+/// selection in it.
 ///
 /// Addressed to the *agent*, not to the pane. `pane.send_keys` would deliver
 /// the key wherever that pane happens to point by the time it arrives, and a

@@ -37,10 +37,11 @@ fn key_gate(pane: Option<bool>) -> Result<(), (StatusCode, &'static str)> {
     }
 }
 
-/// The two bare keys the phone needs: esc stops an agent's turn, enter answers
-/// the question it is showing. Both are agent-only — a shell pane would treat
-/// the key as terminal input and execute whatever sits on its command line, so
-/// the server refuses rather than trusting the UI's gate.
+/// The bare keys the phone needs: esc stops an agent's turn, enter answers the
+/// question it is showing, up and down move the selection in it. All are
+/// agent-only — a shell pane would treat the key as terminal input and execute
+/// whatever sits on its command line, so the server refuses rather than
+/// trusting the UI's gate.
 async fn press(pane_id: &str, key: &str, what: &'static str) -> ApiResult<StatusCode> {
     key_gate(herdr::pane_is_agent(pane_id).await.map_err(failed(what))?)?;
     herdr::press(pane_id, key).await.map_err(failed(what))?;
@@ -53,6 +54,14 @@ async fn interrupt(Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
 
 async fn enter(Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
     press(&pane_id, "enter", "could not send enter to the pane").await
+}
+
+async fn up(Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
+    press(&pane_id, "up", "could not send up to the pane").await
+}
+
+async fn down(Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
+    press(&pane_id, "down", "could not send down to the pane").await
 }
 
 #[derive(Deserialize)]
@@ -198,6 +207,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/panes/{pane_id}/prompt", post(prompt))
         .route("/api/panes/{pane_id}/interrupt", post(interrupt))
         .route("/api/panes/{pane_id}/enter", post(enter))
+        .route("/api/panes/{pane_id}/up", post(up))
+        .route("/api/panes/{pane_id}/down", post(down))
         .route("/api/panes/{pane_id}/output", get(output))
         // Without this, an unknown /api path would fall through to the UI and
         // answer a fetch with 200 and a page of HTML.

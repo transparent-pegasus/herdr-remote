@@ -51,6 +51,18 @@
             ><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"
           /></svg>
         </button>
+        <div id="nav">
+          <button id="up" type="button" disabled aria-label="Up" title="Up">
+            <svg viewBox="0 0 24 24" aria-hidden="true"
+              ><path d="m18 15-6-6-6 6"
+            /></svg>
+          </button>
+          <button id="down" type="button" disabled aria-label="Down" title="Down">
+            <svg viewBox="0 0 24 24" aria-hidden="true"
+              ><path d="m6 9 6 6 6-6"
+            /></svg>
+          </button>
+        </div>
         <button type="submit" class="empty" disabled aria-label="Enter" title="Enter">
           <svg class="send" viewBox="0 0 24 24" aria-hidden="true"
             ><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" /><path
@@ -70,6 +82,7 @@
         isTransient,
         interruptPane,
         paneSubtitle,
+        pressArrow,
         pressEnter,
         sendPrompt,
         type Pane,
@@ -93,6 +106,8 @@
       const stopEl = document.querySelector<HTMLButtonElement>("#stop")!;
       const goEl = document.querySelector<HTMLButtonElement>("#go")!;
       const pushEl = document.querySelector<HTMLButtonElement>("#push")!;
+      const upEl = document.querySelector<HTMLButtonElement>("#up")!;
+      const downEl = document.querySelector<HTMLButtonElement>("#down")!;
       const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
 
       const POLL_MS = 3000;
@@ -253,7 +268,10 @@
         // "go" and "don't stop until completion" are instructions to an agent.
         // A plain shell would run them as a command line, and the apostrophe
         // would leave it hanging in a quote.
-        goEl.disabled = pushEl.disabled = !pane?.agent;
+        // Arrows move the selection in a menu an agent is showing; a shell has
+        // no menu, and the server refuses them there anyway.
+        goEl.disabled = pushEl.disabled = upEl.disabled = downEl.disabled =
+          !pane?.agent;
         // Esc only means something to an agent, and only mid-turn.
         stopEl.disabled = !pane?.agent || pane.state !== "working";
         syncSend();
@@ -374,6 +392,12 @@
         act(pushEl, "don't stop until completion", (id) =>
           sendPrompt(id, "don't stop until completion"),
         ),
+      );
+      upEl.addEventListener("click", () =>
+        act(upEl, "up", (id) => pressArrow(id, "up")),
+      );
+      downEl.addEventListener("click", () =>
+        act(downEl, "down", (id) => pressArrow(id, "down")),
       );
       textEl.addEventListener("input", syncSend);
 
@@ -511,27 +535,28 @@
         font: inherit;
         resize: vertical;
       }
+      /* Equal columns, not `flex: 1` — a flex item's share follows its content,
+         so the padding-less arrow pair came out narrower than its neighbours.
+         minmax(0,1fr) so a narrow phone tightens the buttons instead of
+         pushing the page wider than its viewport. */
       #actions {
-        display: flex;
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
         gap: 0.5rem;
       }
       #actions button {
-        flex: 1;
         display: grid;
         place-items: center;
       }
       #actions svg {
         width: 20px;
         height: 20px;
-        /* lucide is stroke-drawn; `play` is the one glyph that wants a fill. */
+        /* lucide is stroke-drawn throughout, `play` included. */
         fill: none;
         stroke: currentColor;
         stroke-width: 2;
         stroke-linecap: round;
         stroke-linejoin: round;
-      }
-      #go svg {
-        fill: currentColor;
       }
       /* One button, two jobs: the paper plane once there is something to send,
          the return arrow while the composer is empty. */
@@ -550,6 +575,18 @@
         background: none;
         color: inherit;
         font: inherit;
+      }
+      /* One slot, two keys: the pair stacks into the width of a single action
+         and the row grows by the second row's height. 24px each is the WCAG
+         2.2 AA floor (2.5.8) — the same trade the header makes below, for the
+         same reason. Must follow the rule above, which it overrides. */
+      #nav {
+        display: grid;
+        gap: 6px;
+      }
+      #nav button {
+        min-height: 24px;
+        padding: 0;
       }
       /* 24px is the WCAG 2.2 AA floor (2.5.8), below Apple's 44pt guidance —
          a deliberate trade for a header that does not dominate a phone screen.
