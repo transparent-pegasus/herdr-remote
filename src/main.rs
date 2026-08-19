@@ -28,22 +28,31 @@ async fn session() -> ApiResult<Json<herdr::Session>> {
         .map_err(failed("could not read the herdr session"))
 }
 
-/// Esc to a busy pane. Separate from `prompt` because it is a key, not text:
-/// an agent mid-turn is not reading its composer.
-async fn interrupt(Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
-    herdr::press(&pane_id, "esc")
-        .await
-        .map_err(failed("could not interrupt the pane"))?;
+/// The three-way answer for a bare-key route: who is listening decides.
+fn key_gate(pane: Option<bool>) -> Result<(), (StatusCode, &'static str)> {
+    match pane {
+        None => Err((StatusCode::NOT_FOUND, "no such pane")),
+        Some(false) => Err((StatusCode::FORBIDDEN, "not an agent pane")),
+        Some(true) => Ok(()),
+    }
+}
+
+/// The two bare keys the phone needs: esc stops an agent's turn, enter answers
+/// the question it is showing. Both are agent-only — a shell pane would treat
+/// the key as terminal input and execute whatever sits on its command line, so
+/// the server refuses rather than trusting the UI's gate.
+async fn press(pane_id: &str, key: &str, what: &'static str) -> ApiResult<StatusCode> {
+    key_gate(herdr::pane_is_agent(pane_id).await.map_err(failed(what))?)?;
+    herdr::press(pane_id, key).await.map_err(failed(what))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Enter to a pane, for the same reason: an agent asking a yes/no question
-/// wants the key, and an empty composer has nothing else to send.
+async fn interrupt(Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
+    press(&pane_id, "esc", "could not interrupt the pane").await
+}
+
 async fn enter(Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
-    herdr::press(&pane_id, "enter")
-        .await
-        .map_err(failed("could not send enter to the pane"))?;
-    Ok(StatusCode::NO_CONTENT)
+    press(&pane_id, "enter", "could not send enter to the pane").await
 }
 
 #[derive(Deserialize)]
@@ -208,6 +217,16 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_keys_reach_agents_only() {
+        assert_eq!(key_gate(Some(true)), Ok(()));
+        assert_eq!(
+            key_gate(Some(false)),
+            Err((StatusCode::FORBIDDEN, "not an agent pane"))
+        );
+        assert_eq!(key_gate(None), Err((StatusCode::NOT_FOUND, "no such pane")));
+    }
 
     #[test]
     fn unset_allows_only_loopback() {

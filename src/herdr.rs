@@ -208,16 +208,21 @@ pub async fn press(pane_id: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Agent panes take a prompt; a plain shell needs the text plus a newline.
-/// `None` when no such pane exists, so the caller can answer 404.
-pub async fn prompt(pane_id: &str, text: &str) -> Result<Option<()>> {
-    let Some(has_agent) = snapshot()
+/// `Some(true)` = agent pane, `Some(false)` = plain shell, `None` = no such
+/// pane. One snapshot answers both "does it exist" and "who is listening".
+pub async fn pane_is_agent(pane_id: &str) -> Result<Option<bool>> {
+    Ok(snapshot()
         .await?
         .panes
         .iter()
         .find(|pane| pane.pane_id == pane_id)
-        .map(|pane| pane.agent.is_some())
-    else {
+        .map(|pane| pane.agent.is_some()))
+}
+
+/// Agent panes take a prompt; a plain shell needs the text plus a newline.
+/// `None` when no such pane exists, so the caller can answer 404.
+pub async fn prompt(pane_id: &str, text: &str) -> Result<Option<()>> {
+    let Some(has_agent) = pane_is_agent(pane_id).await? else {
         return Ok(None);
     };
 

@@ -263,11 +263,12 @@
           ?.panes.find((candidate) => candidate.id === route.paneId);
       }
 
-      /** With nothing typed the same button sends the Enter key, which is what
-       *  an agent waiting on its own question is asking for. */
+      /** With nothing typed the same button sends the Enter key, which only an
+       *  agent's own question wants — a shell would execute its half-typed line.
+       *  With text, anyone can send: prompt handles shells with send_input. */
       function syncSend() {
-        sendEl.disabled = textEl.disabled;
         const empty = textEl.value.trim() === "";
+        sendEl.disabled = textEl.disabled || (empty && !currentPane()?.agent);
         sendEl.classList.toggle("empty", empty);
         const what = empty ? "Enter" : "Send";
         sendEl.title = what;
