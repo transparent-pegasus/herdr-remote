@@ -1,0 +1,78 @@
+# herdrpowers configuration for this repository.
+# Overrides the pack's shipped defaults in skills/orchestration/roles.yaml,
+# key by key. Anything omitted here falls back to those defaults.
+# Written by the herdrpowers init workflow; safe to edit by hand.
+
+# --- role list: role -> agent type(s) ---
+roles:
+  planning-design:
+    agent: orchestrator
+  reviewer:
+    agents: # one independent review per entry
+      - codex
+      - cursor
+  coder:
+    agent: codex
+  generalist:
+    agent: cursor
+
+fallbacks: # agent -> ordered substitutes, tried left to right
+  cursor: [grok]
+
+# --- delegation defaults applying to every task and workflow ---
+delegation:
+  pane_scope: tab # tab = the orchestrator's own tab only
+  execution: parallel # /full_cycle and /strict_full_cycle strategy
+
+# --- delegation tasks: each assigned a role from the list above ---
+# mode: delegate (fresh pane of that role) | orchestrator (this pane) |
+#       implementer (the pane that already owns the task)
+assignments:
+
+  # work tasks — always happen; `mode` decides whether they are delegated
+  plan-and-design:
+    role: planning-design
+    mode: orchestrator
+  complex-coding:
+    role: coder
+    mode: delegate
+  simple-coding:
+    role: generalist
+    mode: delegate
+  chores:
+    role: generalist
+    mode: delegate
+  test-authoring:
+    role: coder
+    mode: delegate
+  fix-round-test-authoring:
+    role: coder
+    mode: delegate
+  review-fixes:
+    role: coder
+    mode: implementer
+  verification:
+    role: generalist
+    mode: delegate
+
+  # review tasks — `enabled: false` removes the gate entirely
+  plan-double-review:
+    role: reviewer
+    mode: delegate
+    enabled: true
+  documentation-impact-review:
+    role: generalist
+    mode: delegate
+    enabled: true
+  task-review:
+    role: reviewer
+    mode: delegate
+    enabled: true
+  fix-round-re-review:
+    role: reviewer
+    mode: delegate
+    enabled: true
+  final-branch-review:
+    role: reviewer
+    mode: delegate
+    enabled: true
