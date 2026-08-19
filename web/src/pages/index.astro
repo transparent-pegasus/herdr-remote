@@ -246,8 +246,8 @@
         // A plain shell would run them as a command line, and the apostrophe
         // would leave it hanging in a quote.
         goEl.disabled = pushEl.disabled = !pane?.agent;
-        // Esc only means something to a pane that is mid-turn.
-        stopEl.disabled = pane?.state !== "working";
+        // Esc only means something to an agent, and only mid-turn.
+        stopEl.disabled = !pane?.agent || pane.state !== "working";
         syncSend();
       }
 
@@ -391,6 +391,7 @@
       }
       h1 {
         flex: 1;
+        align-self: center;
         overflow: hidden;
         /* margin: 0 matters as much as the size here — the UA default adds
            0.67em above and below, which was most of the old header. */
@@ -505,15 +506,22 @@
         font: inherit;
       }
       /* 24px is the WCAG 2.2 AA floor (2.5.8), below Apple's 44pt guidance —
-         a deliberate trade for a header that does not dominate a phone screen. */
+         a deliberate trade for a header that does not dominate a phone screen.
+         Fixed height rather than min-height, and line-height 1: the two arrow
+         glyphs have different intrinsic heights, so anything content-driven
+         leaves the pair mismatched. */
       #refresh,
       #back {
+        box-sizing: border-box;
         display: grid;
         place-items: center;
+        height: 24px;
+        /* min-height wins over height, and the shared rule above sets 44px. */
+        min-height: 0;
         min-width: 24px;
-        min-height: 24px;
-        padding: 0.15rem 0.35rem;
+        padding: 0 0.35rem;
         font-size: 0.85rem;
+        line-height: 1;
         text-decoration: none;
       }
       #more {
