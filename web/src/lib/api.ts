@@ -9,12 +9,31 @@ export type Tab = { id: string; label: string; panes: Pane[] };
 
 export type Session = { tabs: Tab[] };
 
-export async function fetchSession(): Promise<Session> {
-	const response = await fetch("/api/session");
+/** The server's error bodies are short and human-readable; show them. */
+async function reason(response: Response, fallback: string): Promise<string> {
+	const body = (await response.text().catch(() => "")).trim();
+	return body ? body.slice(0, 200) : `${fallback} (${response.status})`;
+}
+
+function isSession(value: unknown): value is Session {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		Array.isArray((value as Session).tabs)
+	);
+}
+
+export async function fetchSession(signal?: AbortSignal): Promise<Session> {
+	const response = await fetch("/api/session", { signal });
 	if (!response.ok) {
-		throw new Error(`could not load session (${response.status})`);
+		throw new Error(await reason(response, "could not load session"));
 	}
-	return (await response.json()) as Session;
+	const body: unknown = await response.json();
+	// A proxy or a future schema slip should not surface as "reading 'length'".
+	if (!isSession(body)) {
+		throw new Error("unexpected response from /api/session");
+	}
+	return body;
 }
 
 export async function sendPrompt(paneId: string, text: string): Promise<void> {
@@ -27,7 +46,7 @@ export async function sendPrompt(paneId: string, text: string): Promise<void> {
 		},
 	);
 	if (!response.ok) {
-		throw new Error(`could not send (${response.status})`);
+		throw new Error(await reason(response, "could not send"));
 	}
 }
 

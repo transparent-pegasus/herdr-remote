@@ -6,14 +6,22 @@ use axum::{Json, Router, routing::get, routing::post};
 use serde::Deserialize;
 use tower_http::services::ServeDir;
 
-type ApiResult<T> = Result<T, (StatusCode, String)>;
+type ApiResult<T> = Result<T, (StatusCode, &'static str)>;
 
-fn failed(error: anyhow::Error) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"))
+/// Detail goes to the operator's terminal, not to the client: the context
+/// chain carries the herdr socket path.
+fn failed(what: &'static str) -> impl FnOnce(anyhow::Error) -> (StatusCode, &'static str) {
+    move |error| {
+        eprintln!("{what}: {error:#}");
+        (StatusCode::INTERNAL_SERVER_ERROR, what)
+    }
 }
 
 async fn session() -> ApiResult<Json<herdr::Session>> {
-    herdr::session().await.map(Json).map_err(failed)
+    herdr::session()
+        .await
+        .map(Json)
+        .map_err(failed("could not read the herdr session"))
 }
 
 #[derive(Deserialize)]
@@ -22,13 +30,10 @@ struct Prompt {
 }
 
 async fn prompt(Path(pane_id): Path<String>, Json(body): Json<Prompt>) -> ApiResult<StatusCode> {
-    let has_agent = herdr::pane_has_agent(&pane_id)
+    herdr::prompt(&pane_id, &body.text)
         .await
-        .map_err(failed)?
-        .ok_or((StatusCode::NOT_FOUND, format!("no pane {pane_id}")))?;
-    herdr::prompt(&pane_id, &body.text, has_agent)
-        .await
-        .map_err(failed)?;
+        .map_err(failed("could not send to the pane"))?
+        .ok_or((StatusCode::NOT_FOUND, "no such pane"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

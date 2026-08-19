@@ -1,11 +1,21 @@
 //! Thin client for the Herdr Unix socket: newline-delimited JSON, one request
 //! per connection. Protocol shapes come from `herdr api schema --json`.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::time::timeout;
+
+/// Our own id, echoed back by herdr; one request per connection, so a fixed
+/// value is enough to catch a reply that belongs to someone else.
+const REQUEST_ID: &str = "herdr-remote";
+const TIMEOUT: Duration = Duration::from_secs(10);
+/// A stalled peer must not be able to grow the read buffer without bound.
+const MAX_FRAME: u64 = 4 << 20;
 
 fn socket_path() -> String {
     std::env::var("HERDR_SOCKET_PATH").unwrap_or_else(|_| {
@@ -16,24 +26,46 @@ fn socket_path() -> String {
 
 /// Send one request, return its `result`.
 pub async fn call(method: &str, params: Value) -> Result<Value> {
+    // A herdr that accepts the connection and then never answers must not pin
+    // an axum task and a socket descriptor forever.
+    timeout(TIMEOUT, exchange(method, params))
+        .await
+        .with_context(|| format!("herdr {method} timed out after {TIMEOUT:?}"))?
+}
+
+async fn exchange(method: &str, params: Value) -> Result<Value> {
     let path = socket_path();
     let stream = UnixStream::connect(&path)
         .await
         .with_context(|| format!("connect to herdr socket at {path}"))?;
     let mut conn = BufReader::new(stream);
 
-    let request = json!({ "id": "herdr-remote", "method": method, "params": params });
+    let request = json!({ "id": REQUEST_ID, "method": method, "params": params });
     conn.get_mut()
         .write_all(format!("{request}\n").as_bytes())
         .await?;
 
     let mut line = String::new();
-    conn.read_line(&mut line).await?;
+    let read = (&mut conn)
+        .take(MAX_FRAME)
+        .read_line(&mut line)
+        .await
+        .with_context(|| format!("read reply to herdr {method}"))?;
+    if read == 0 {
+        bail!("herdr {method}: socket closed before replying");
+    }
+    if !line.ends_with('\n') {
+        bail!("herdr {method}: reply was truncated after {read} bytes");
+    }
+
     let response: Value = serde_json::from_str(&line)
         .with_context(|| format!("herdr {method} returned non-JSON: {line}"))?;
 
     if let Some(error) = response.get("error") {
         bail!("herdr {method} failed: {error}");
+    }
+    if response.get("id").and_then(Value::as_str) != Some(REQUEST_ID) {
+        bail!("herdr {method}: reply carried a foreign id");
     }
     response
         .get("result")
@@ -61,6 +93,7 @@ struct PaneInfo {
     tab_id: String,
     agent: Option<String>,
     agent_status: String,
+    label: Option<String>,
     title: Option<String>,
     terminal_title_stripped: Option<String>,
 }
@@ -88,13 +121,14 @@ pub struct Pane {
 }
 
 impl PaneInfo {
-    /// Panes usually carry no label; fall back to the terminal title, then the id.
+    /// A pane renamed in herdr carries `label`; otherwise fall back to the
+    /// terminal title, then to the id so a row is never blank.
     fn label(&self) -> String {
-        [&self.title, &self.terminal_title_stripped]
+        [&self.label, &self.title, &self.terminal_title_stripped]
             .into_iter()
             .flatten()
-            .map(|s| s.trim())
-            .find(|s| !s.is_empty())
+            .map(|candidate| candidate.trim())
+            .find(|candidate| !candidate.is_empty())
             .unwrap_or(&self.pane_id)
             .to_string()
     }
@@ -136,18 +170,19 @@ pub async fn session() -> Result<Session> {
     Ok(to_session(snapshot().await?))
 }
 
+/// Agent panes take a prompt; a plain shell needs the text plus a newline.
 /// `None` when no such pane exists, so the caller can answer 404.
-pub async fn pane_has_agent(pane_id: &str) -> Result<Option<bool>> {
-    Ok(snapshot()
+pub async fn prompt(pane_id: &str, text: &str) -> Result<Option<()>> {
+    let Some(has_agent) = snapshot()
         .await?
         .panes
         .iter()
         .find(|pane| pane.pane_id == pane_id)
-        .map(|pane| pane.agent.is_some()))
-}
+        .map(|pane| pane.agent.is_some())
+    else {
+        return Ok(None);
+    };
 
-/// Agent panes take a prompt; a plain shell needs the text plus a newline.
-pub async fn prompt(pane_id: &str, text: &str, has_agent: bool) -> Result<()> {
     if has_agent {
         call("agent.prompt", json!({ "target": pane_id, "text": text })).await?;
     } else {
@@ -157,7 +192,7 @@ pub async fn prompt(pane_id: &str, text: &str, has_agent: bool) -> Result<()> {
         )
         .await?;
     }
-    Ok(())
+    Ok(Some(()))
 }
 
 #[cfg(test)]
@@ -175,6 +210,9 @@ mod tests {
                   "agent_status": "idle", "title": "orchestrator" },
                 { "pane_id": "w1:p2", "tab_id": "w1:t1", "agent": null,
                   "agent_status": "unknown", "terminal_title_stripped": "  " },
+                { "pane_id": "w1:p4", "tab_id": "w1:t1", "agent": null,
+                  "agent_status": "idle", "label": "renamed",
+                  "title": "ignored terminal title" },
                 { "pane_id": "w1:p3", "tab_id": "w1:tX", "agent": null,
                   "agent_status": "unknown" }
             ]
@@ -190,7 +228,7 @@ mod tests {
         assert_eq!(session.tabs.len(), 1);
         let tab = &session.tabs[0];
         assert_eq!(tab.id, "w1:t1");
-        assert_eq!(tab.panes.len(), 2);
+        assert_eq!(tab.panes.len(), 3);
 
         assert_eq!(
             tab.panes[0],
@@ -204,5 +242,7 @@ mod tests {
         // Blank titles fall through to the pane id rather than rendering empty.
         assert_eq!(tab.panes[1].label, "w1:p2");
         assert_eq!(tab.panes[1].agent, None);
+        // A herdr rename wins over the terminal title.
+        assert_eq!(tab.panes[2].label, "renamed");
     }
 }

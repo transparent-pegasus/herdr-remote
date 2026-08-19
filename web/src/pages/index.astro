@@ -1,11 +1,11 @@
----
----
-
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, interactive-widget=resizes-content"
+    />
     <meta name="color-scheme" content="light dark" />
     <title>Herdr Remote</title>
   </head>
@@ -15,13 +15,17 @@
       <button id="refresh" type="button" aria-label="Reload panes">&#8635;</button>
     </header>
 
+    <noscript>This page needs JavaScript to list panes and send prompts.</noscript>
     <p id="status" role="status"></p>
-    <div id="tabs"></div>
+    <div id="tabs" role="radiogroup" aria-label="Panes"></div>
 
     <form id="composer" hidden>
       <label for="text" id="target"></label>
-      <textarea id="text" rows="4" placeholder="Type an instruction…" required
-      ></textarea>
+      <textarea
+        id="text"
+        rows="4"
+        enterkeyhint="send"
+        placeholder="Type an instruction…"></textarea>
       <button type="submit">Send</button>
     </form>
 
@@ -31,6 +35,7 @@
         paneSubtitle,
         sendPrompt,
         type Pane,
+        type Tab,
       } from "../lib/api";
 
       const tabsEl = document.querySelector<HTMLDivElement>("#tabs")!;
@@ -41,26 +46,38 @@
       const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
 
       let selected: Pane | null = null;
+      let generation = 0;
 
-      const say = (message: string) => {
+      function say(message: string, failed = false) {
         statusEl.textContent = message;
-      };
+        statusEl.classList.toggle("error", failed && message !== "");
+      }
+
+      function markSelection() {
+        for (const button of tabsEl.querySelectorAll("button")) {
+          button.setAttribute(
+            "aria-checked",
+            button.dataset.paneId === selected?.id ? "true" : "false",
+          );
+        }
+      }
 
       function select(pane: Pane) {
         selected = pane;
         targetEl.textContent = pane.label;
         composerEl.hidden = false;
-        for (const button of tabsEl.querySelectorAll("button")) {
-          button.setAttribute(
-            "aria-current",
-            button.dataset.paneId === pane.id ? "true" : "false",
-          );
-        }
+        markSelection();
         textEl.focus();
       }
 
+      function deselect() {
+        selected = null;
+        composerEl.hidden = true;
+        targetEl.textContent = "";
+      }
+
       // textContent throughout: pane labels are terminal titles, not our markup.
-      function render(tabs: Awaited<ReturnType<typeof fetchSession>>["tabs"]) {
+      function render(tabs: Tab[]) {
         tabsEl.replaceChildren();
         for (const tab of tabs) {
           const section = document.createElement("section");
@@ -71,11 +88,8 @@
           for (const pane of tab.panes) {
             const button = document.createElement("button");
             button.type = "button";
+            button.role = "radio";
             button.dataset.paneId = pane.id;
-            button.setAttribute(
-              "aria-current",
-              pane.id === selected?.id ? "true" : "false",
-            );
 
             const name = document.createElement("span");
             name.className = "name";
@@ -90,16 +104,31 @@
           }
           tabsEl.append(section);
         }
+
+        // A pane that has since closed must not stay addressable in the composer.
+        const stillThere = tabs.some((tab) =>
+          tab.panes.some((pane) => pane.id === selected?.id),
+        );
+        if (selected && !stillThere) {
+          deselect();
+          say("That pane is gone.", true);
+        }
+        markSelection();
       }
 
       async function load() {
+        const mine = ++generation;
         say("Loading…");
         try {
-          const session = await fetchSession();
+          const session = await fetchSession(AbortSignal.timeout(15000));
+          if (mine !== generation) return; // a newer refresh already painted
           render(session.tabs);
-          say(session.tabs.length ? "" : "No panes.");
+          if (statusEl.textContent === "Loading…") {
+            say(session.tabs.length ? "" : "No panes.");
+          }
         } catch (error) {
-          say(error instanceof Error ? error.message : "Could not load session.");
+          if (mine !== generation) return;
+          say(error instanceof Error ? error.message : "Could not load.", true);
         }
       }
 
@@ -107,7 +136,11 @@
         event.preventDefault();
         const pane = selected;
         const text = textEl.value.trim();
-        if (!pane || !text) return;
+        if (!pane) return;
+        if (!text) {
+          say("Type something first.", true);
+          return;
+        }
 
         const submit = composerEl.querySelector("button")!;
         submit.disabled = true;
@@ -117,7 +150,7 @@
           textEl.value = "";
           say(`Sent to ${pane.label}.`);
         } catch (error) {
-          say(error instanceof Error ? error.message : "Could not send.");
+          say(error instanceof Error ? error.message : "Could not send.", true);
         } finally {
           submit.disabled = false;
         }
@@ -127,16 +160,21 @@
       load();
     </script>
 
-    <style>
+    <style is:global>
+      /* Global, not scoped: the pane rows below are built in JS and so never
+         carry Astro's data-astro-cid attribute. */
       :root {
         --edge: color-mix(in srgb, currentColor 15%, transparent);
         --muted: color-mix(in srgb, currentColor 60%, transparent);
         --accent: color-mix(in srgb, currentColor 8%, transparent);
       }
       body {
+        display: flex;
+        flex-direction: column;
+        min-height: 100dvh;
         margin: 0 auto;
         max-width: 34rem;
-        padding: 0 1rem 3rem;
+        padding: 0 1rem;
         font: 1rem/1.5 system-ui, sans-serif;
       }
       header {
@@ -155,11 +193,21 @@
         letter-spacing: 0.08em;
         color: var(--muted);
       }
+      #status {
+        color: var(--muted);
+      }
       #status:empty {
         display: none;
       }
-      #status {
-        color: var(--muted);
+      #status.error {
+        color: inherit;
+        font-weight: 600;
+      }
+      /* The list scrolls; the composer keeps its own space in the column, so a
+         pane row can never end up underneath it. */
+      #tabs {
+        flex: 1;
+        overflow-y: auto;
       }
       #tabs button {
         display: block;
@@ -173,7 +221,7 @@
         font: inherit;
         text-align: left;
       }
-      #tabs button[aria-current="true"] {
+      #tabs button[aria-checked="true"] {
         background: var(--accent);
         border-color: currentColor;
       }
@@ -189,13 +237,15 @@
         color: var(--muted);
       }
       #composer {
-        position: sticky;
-        bottom: 0;
         display: grid;
         gap: 0.5rem;
-        padding: 0.75rem 0;
+        padding: 0.75rem 0 calc(0.75rem + env(safe-area-inset-bottom));
         border-top: 1px solid var(--edge);
         background: Canvas;
+      }
+      /* Older WebViews do not mark the UA [hidden] rule !important. */
+      #composer[hidden] {
+        display: none;
       }
       #target {
         font-size: 0.85rem;
@@ -212,6 +262,7 @@
       }
       #composer button,
       #refresh {
+        min-height: 44px;
         padding: 0.75rem;
         border: 1px solid var(--edge);
         border-radius: 0.5rem;
@@ -220,6 +271,7 @@
         font: inherit;
       }
       #refresh {
+        min-width: 44px;
         padding: 0.4rem 0.75rem;
       }
     </style>
