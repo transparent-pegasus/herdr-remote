@@ -50,6 +50,21 @@ export async function sendPrompt(paneId: string, text: string): Promise<void> {
 	}
 }
 
+/** Plain text, straight from the pane; the caller renders it verbatim. */
+export async function fetchOutput(
+	paneId: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	const response = await fetch(
+		`/api/panes/${encodeURIComponent(paneId)}/output`,
+		{ signal },
+	);
+	if (!response.ok) {
+		throw new Error(await reason(response, "could not read the pane"));
+	}
+	return response.text();
+}
+
 /** Agent panes show what they are and what they are doing; shells just say so. */
 export function paneSubtitle(pane: Pane): string {
 	return pane.agent ? `${pane.agent} · ${pane.state}` : "shell";

@@ -170,6 +170,23 @@ pub async fn session() -> Result<Session> {
     Ok(to_session(snapshot().await?))
 }
 
+#[derive(Deserialize)]
+struct Read {
+    text: String,
+}
+
+/// The pane's recent output, ANSI already stripped by herdr. `lines` bounds
+/// what a phone has to download and paint; herdr flags the rest truncated.
+pub async fn read(pane_id: &str, lines: u32) -> Result<String> {
+    let result = call(
+        "pane.read",
+        json!({ "pane_id": pane_id, "source": "recent", "lines": lines }),
+    )
+    .await?;
+    let read = result.get("read").context("pane.read returned no read")?;
+    Ok(serde_json::from_value::<Read>(read.clone())?.text)
+}
+
 /// Agent panes take a prompt; a plain shell needs the text plus a newline.
 /// `None` when no such pane exists, so the caller can answer 404.
 pub async fn prompt(pane_id: &str, text: &str) -> Result<Option<()>> {

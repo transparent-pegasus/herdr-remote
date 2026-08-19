@@ -11,130 +11,208 @@
   </head>
   <body>
     <header>
-      <h1>Herdr Remote</h1>
-      <button id="refresh" type="button" aria-label="Reload panes">&#8635;</button>
+      <a id="back" href="/" hidden aria-label="Back">&#8592;</a>
+      <h1 id="heading">Herdr Remote</h1>
+      <button id="refresh" type="button" aria-label="Reload">&#8635;</button>
     </header>
 
     <noscript>This page needs JavaScript to list panes and send prompts.</noscript>
     <p id="status" role="status"></p>
-    <div id="tabs" role="radiogroup" aria-label="Panes"></div>
+    <div id="list"></div>
+    <pre id="log" hidden></pre>
 
-    <form id="composer" hidden>
+    <form id="composer">
       <label for="text" id="target"></label>
       <textarea
         id="text"
         rows="4"
         enterkeyhint="send"
+        disabled
         placeholder="Type an instruction…"></textarea>
-      <button type="submit">Send</button>
+      <button type="submit" disabled>Send</button>
     </form>
 
     <script>
       import {
+        fetchOutput,
         fetchSession,
         paneSubtitle,
         sendPrompt,
         type Pane,
+        type Session,
         type Tab,
       } from "../lib/api";
+      import { href, parseRoute } from "../lib/route";
 
-      const tabsEl = document.querySelector<HTMLDivElement>("#tabs")!;
+      const listEl = document.querySelector<HTMLDivElement>("#list")!;
+      const logEl = document.querySelector<HTMLPreElement>("#log")!;
       const statusEl = document.querySelector<HTMLParagraphElement>("#status")!;
+      const headingEl = document.querySelector<HTMLHeadingElement>("#heading")!;
+      const backEl = document.querySelector<HTMLAnchorElement>("#back")!;
       const composerEl = document.querySelector<HTMLFormElement>("#composer")!;
       const targetEl = document.querySelector<HTMLLabelElement>("#target")!;
       const textEl = document.querySelector<HTMLTextAreaElement>("#text")!;
+      const sendEl = composerEl.querySelector<HTMLButtonElement>("button")!;
       const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
 
-      let selected: Pane | null = null;
-      let generation = 0;
+      const POLL_MS = 3000;
+
+      let session: Session | null = null;
+      let watching: string | null = null;
+      let timer: ReturnType<typeof setInterval> | undefined;
+      let loads = 0;
+      let watches = 0;
 
       function say(message: string, failed = false) {
         statusEl.textContent = message;
         statusEl.classList.toggle("error", failed && message !== "");
       }
 
-      function markSelection() {
-        for (const button of tabsEl.querySelectorAll("button")) {
-          button.setAttribute(
-            "aria-checked",
-            button.dataset.paneId === selected?.id ? "true" : "false",
+      // textContent throughout: labels are terminal titles, not our markup.
+      function row(path: string, name: string, subtitle: string) {
+        const link = document.createElement("a");
+        link.href = path;
+        link.className = "row";
+
+        const nameEl = document.createElement("span");
+        nameEl.className = "name";
+        nameEl.textContent = name;
+        const subtitleEl = document.createElement("span");
+        subtitleEl.className = "subtitle";
+        subtitleEl.textContent = subtitle;
+
+        link.append(nameEl, subtitleEl);
+        return link;
+      }
+
+      function tabRow(tab: Tab) {
+        const count = tab.panes.length === 1 ? "1 pane" : `${tab.panes.length} panes`;
+        return row(href({ tabId: tab.id }), tab.label, count);
+      }
+
+      // Reading the tail is the point, so follow it — unless the reader has
+      // scrolled up, in which case leave them where they are.
+      function paint(text: string) {
+        const following =
+          logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 8;
+        logEl.textContent = text;
+        if (following) logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      /** Poll the open pane's output; one pane is watched at a time. */
+      function watch(pane: Pane | null) {
+        clearInterval(timer);
+        watching = pane?.id ?? null;
+        if (!pane) return;
+
+        const mine = ++watches;
+        const tick = async () => {
+          if (document.hidden) return; // a backgrounded phone tab polls nothing
+          try {
+            const text = await fetchOutput(pane.id, AbortSignal.timeout(15000));
+            if (mine !== watches) return; // a later pane already owns the view
+            paint(text);
+          } catch (error) {
+            if (mine !== watches) return;
+            // Keep polling a pane that is merely slow; a closed one shows up as
+            // gone on the next session reload.
+            say(error instanceof Error ? error.message : "Could not read.", true);
+          }
+        };
+        logEl.textContent = "";
+        tick();
+        timer = setInterval(tick, POLL_MS);
+      }
+
+      /** The URL is the state: everything on screen is derived from it. */
+      function render() {
+        if (!session) return;
+        const route = parseRoute(location.pathname);
+        const tab = session.tabs.find((candidate) => candidate.id === route.tabId);
+        const pane = tab?.panes.find((candidate) => candidate.id === route.paneId) ?? null;
+
+        // A tab or pane can close between two renders; drop back rather than
+        // leaving a dead target addressable in the composer.
+        if (route.tabId && !tab) {
+          go("/", true);
+          say("That tab is gone.", true);
+          return;
+        }
+        if (route.paneId && !pane) {
+          go(href({ tabId: tab!.id }), true);
+          say("That pane is gone.", true);
+          return;
+        }
+
+        headingEl.textContent = pane ? pane.label : tab ? tab.label : "Herdr Remote";
+        backEl.hidden = !tab;
+        backEl.href = pane ? href({ tabId: tab!.id }) : "/";
+
+        listEl.hidden = pane !== null;
+        logEl.hidden = pane === null;
+        if (!pane) {
+          listEl.replaceChildren(
+            ...(tab
+              ? tab.panes.map((candidate) =>
+                  row(
+                    href({ tabId: tab.id, paneId: candidate.id }),
+                    candidate.label,
+                    paneSubtitle(candidate),
+                  ),
+                )
+              : session.tabs.map(tabRow)),
           );
         }
-      }
-
-      function select(pane: Pane) {
-        selected = pane;
-        targetEl.textContent = pane.label;
-        composerEl.hidden = false;
-        markSelection();
-        textEl.focus();
-      }
-
-      function deselect() {
-        selected = null;
-        composerEl.hidden = true;
-        targetEl.textContent = "";
-      }
-
-      // textContent throughout: pane labels are terminal titles, not our markup.
-      function render(tabs: Tab[]) {
-        tabsEl.replaceChildren();
-        for (const tab of tabs) {
-          const section = document.createElement("section");
-          const heading = document.createElement("h2");
-          heading.textContent = tab.label;
-          section.append(heading);
-
-          for (const pane of tab.panes) {
-            const button = document.createElement("button");
-            button.type = "button";
-            button.role = "radio";
-            button.dataset.paneId = pane.id;
-
-            const name = document.createElement("span");
-            name.className = "name";
-            name.textContent = pane.label;
-            const subtitle = document.createElement("span");
-            subtitle.className = "subtitle";
-            subtitle.textContent = paneSubtitle(pane);
-
-            button.append(name, subtitle);
-            button.addEventListener("click", () => select(pane));
-            section.append(button);
-          }
-          tabsEl.append(section);
+        if ((pane?.id ?? null) !== watching) {
+          watch(pane);
+          if (pane) textEl.focus();
         }
 
-        // A pane that has since closed must not stay addressable in the composer.
-        const stillThere = tabs.some((tab) =>
-          tab.panes.some((pane) => pane.id === selected?.id),
-        );
-        if (selected && !stillThere) {
-          deselect();
-          say("That pane is gone.", true);
-        }
-        markSelection();
+        targetEl.textContent = pane ? paneSubtitle(pane) : "Pick a pane first.";
+        textEl.disabled = sendEl.disabled = !pane;
+      }
+
+      function go(path: string, replace = false) {
+        history[replace ? "replaceState" : "pushState"]({}, "", path);
+        render();
       }
 
       async function load() {
-        const mine = ++generation;
+        const mine = ++loads;
         say("Loading…");
         try {
-          const session = await fetchSession(AbortSignal.timeout(15000));
-          if (mine !== generation) return; // a newer refresh already painted
-          render(session.tabs);
+          const fresh = await fetchSession(AbortSignal.timeout(15000));
+          if (mine !== loads) return; // a newer reload already painted
+          session = fresh;
           if (statusEl.textContent === "Loading…") {
-            say(session.tabs.length ? "" : "No panes.");
+            say(fresh.tabs.length ? "" : "No panes.");
           }
+          render();
         } catch (error) {
-          if (mine !== generation) return;
+          if (mine !== loads) return;
           say(error instanceof Error ? error.message : "Could not load.", true);
         }
       }
 
+      // Same-origin links move the app, not the browser. Modified clicks keep
+      // their usual meaning (new tab, download).
+      document.addEventListener("click", (event) => {
+        if (event.defaultPrevented || event.button !== 0) return;
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        const link = (event.target as Element | null)?.closest?.<HTMLAnchorElement>("a");
+        if (!link || link.origin !== location.origin) return;
+        event.preventDefault();
+        go(link.pathname);
+      });
+
+      window.addEventListener("popstate", render);
+
       composerEl.addEventListener("submit", async (event) => {
         event.preventDefault();
-        const pane = selected;
+        const route = parseRoute(location.pathname);
+        const pane = session?.tabs
+          .find((tab) => tab.id === route.tabId)
+          ?.panes.find((candidate) => candidate.id === route.paneId);
         const text = textEl.value.trim();
         if (!pane) return;
         if (!text) {
@@ -142,17 +220,16 @@
           return;
         }
 
-        const submit = composerEl.querySelector("button")!;
-        submit.disabled = true;
+        sendEl.disabled = true;
         say("Sending…");
         try {
           await sendPrompt(pane.id, text);
           textEl.value = "";
-          say(`Sent to ${pane.label}.`);
+          say("");
         } catch (error) {
           say(error instanceof Error ? error.message : "Could not send.", true);
         } finally {
-          submit.disabled = false;
+          sendEl.disabled = false;
         }
       });
 
@@ -161,17 +238,17 @@
     </script>
 
     <style is:global>
-      /* Global, not scoped: the pane rows below are built in JS and so never
-         carry Astro's data-astro-cid attribute. */
+      /* Global, not scoped: the rows below are built in JS and so never carry
+         Astro's data-astro-cid attribute. */
       :root {
         --edge: color-mix(in srgb, currentColor 15%, transparent);
         --muted: color-mix(in srgb, currentColor 60%, transparent);
-        --accent: color-mix(in srgb, currentColor 8%, transparent);
       }
       body {
         display: flex;
         flex-direction: column;
         min-height: 100dvh;
+        max-height: 100dvh;
         margin: 0 auto;
         max-width: 34rem;
         padding: 0 1rem;
@@ -180,18 +257,14 @@
       header {
         display: flex;
         align-items: center;
-        justify-content: space-between;
         gap: 1rem;
       }
       h1 {
+        flex: 1;
+        overflow: hidden;
         font-size: 1.25rem;
-      }
-      h2 {
-        margin: 1.5rem 0 0.5rem;
-        font-size: 0.8rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: var(--muted);
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       #status {
         color: var(--muted);
@@ -203,27 +276,28 @@
         color: inherit;
         font-weight: 600;
       }
-      /* The list scrolls; the composer keeps its own space in the column, so a
-         pane row can never end up underneath it. */
-      #tabs {
+      /* The list and the log scroll; the composer keeps its own space in the
+         column, so neither can end up underneath it. */
+      #list,
+      #log {
         flex: 1;
         overflow-y: auto;
+        overscroll-behavior: contain;
       }
-      #tabs button {
+      #log {
+        margin: 0;
+        font: 0.8rem/1.4 ui-monospace, monospace;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .row {
         display: block;
-        width: 100%;
         margin-bottom: 0.5rem;
         padding: 0.75rem;
         border: 1px solid var(--edge);
         border-radius: 0.5rem;
-        background: none;
         color: inherit;
-        font: inherit;
-        text-align: left;
-      }
-      #tabs button[aria-checked="true"] {
-        background: var(--accent);
-        border-color: currentColor;
+        text-decoration: none;
       }
       .name {
         display: block;
@@ -243,9 +317,9 @@
         border-top: 1px solid var(--edge);
         background: Canvas;
       }
-      /* Older WebViews do not mark the UA [hidden] rule !important. */
-      #composer[hidden] {
-        display: none;
+      /* Disabled is a state, not a hidden panel: it stays in place and says why. */
+      #composer:has(:disabled) {
+        opacity: 0.55;
       }
       #target {
         font-size: 0.85rem;
@@ -261,7 +335,8 @@
         resize: vertical;
       }
       #composer button,
-      #refresh {
+      #refresh,
+      #back {
         min-height: 44px;
         padding: 0.75rem;
         border: 1px solid var(--edge);
@@ -270,9 +345,19 @@
         color: inherit;
         font: inherit;
       }
-      #refresh {
+      #refresh,
+      #back {
+        display: grid;
+        place-items: center;
         min-width: 44px;
         padding: 0.4rem 0.75rem;
+        text-decoration: none;
+      }
+      /* Older WebViews do not mark the UA [hidden] rule !important. */
+      #back[hidden],
+      #list[hidden],
+      #log[hidden] {
+        display: none;
       }
     </style>
   </body>

@@ -14,10 +14,17 @@ Single Rust binary (Axum) serving the API and the static Astro UI from `web/dist
 GET  /api/health                   # "ok"
 GET  /api/session                  # {"tabs":[{"id","label","panes":[{"id","label","agent","state"}]}]}
 POST /api/panes/{pane_id}/prompt   # {"text": "..."} -> 204, or 404 for an unknown pane
+GET  /api/panes/{pane_id}/output   # the pane's last 300 lines, as plain text
 ```
 
 `/api/session` reshapes Herdr's `session.snapshot` rather than forwarding it, so a
 schema change on the Herdr side stops at the server instead of reaching the phone.
+The UI keeps its state in the path — `/` lists tabs, `/t/<tab>` lists that tab's
+panes, `/t/<tab>/p/<pane>` is one pane's log, polled every 3 seconds while that
+page is open and in the foreground, with the composer aimed at it. So anything
+outside `/api` that is not a file in `web/dist` is answered with `index.html`,
+and an unknown `/api` path still 404s instead of handing a fetch a page of HTML.
+
 `prompt` picks its Herdr call per pane: `agent.prompt` where an agent is attached,
 otherwise `pane.send_input` with a trailing `enter`.
 
