@@ -36,43 +36,43 @@ export async function fetchSession(signal?: AbortSignal): Promise<Session> {
 	return body;
 }
 
-export async function sendPrompt(paneId: string, text: string): Promise<void> {
+const paneUrl = (paneId: string, rest: string) =>
+	`/api/panes/${encodeURIComponent(paneId)}/${rest}`;
+
+/** Every write is the same request modulo path and body; only the fallback
+ *  message differs, and the server's own text wins when it sends one. */
+async function post(
+	url: string,
+	fallback: string,
+	body?: unknown,
+): Promise<void> {
 	const response = await fetch(
-		`/api/panes/${encodeURIComponent(paneId)}/prompt`,
-		{
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ text }),
-		},
+		url,
+		body === undefined
+			? { method: "POST" }
+			: {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(body),
+				},
 	);
 	if (!response.ok) {
-		throw new Error(await reason(response, "could not send"));
+		throw new Error(await reason(response, fallback));
 	}
 }
 
-export type Output = { text: string; truncated: boolean };
+export const sendPrompt = (paneId: string, text: string): Promise<void> =>
+	post(paneUrl(paneId, "prompt"), "could not send", { text });
 
 /** Esc to a pane that is mid-turn. */
-export async function interruptPane(paneId: string): Promise<void> {
-	const response = await fetch(
-		`/api/panes/${encodeURIComponent(paneId)}/interrupt`,
-		{ method: "POST" },
-	);
-	if (!response.ok) {
-		throw new Error(await reason(response, "could not interrupt"));
-	}
-}
+export const interruptPane = (paneId: string): Promise<void> =>
+	post(paneUrl(paneId, "interrupt"), "could not interrupt");
 
 /** Enter to a pane, for the question an agent is already asking. */
-export async function pressEnter(paneId: string): Promise<void> {
-	const response = await fetch(
-		`/api/panes/${encodeURIComponent(paneId)}/enter`,
-		{ method: "POST" },
-	);
-	if (!response.ok) {
-		throw new Error(await reason(response, "could not send enter"));
-	}
-}
+export const pressEnter = (paneId: string): Promise<void> =>
+	post(paneUrl(paneId, "enter"), "could not send enter");
+
+export type Output = { text: string; truncated: boolean };
 
 /** Plain text, straight from the pane; the caller renders it verbatim.
  *  `truncated` says herdr held more than `lines` asked for. */
@@ -83,7 +83,7 @@ export async function fetchOutput(
 	signal?: AbortSignal,
 ): Promise<Output> {
 	const response = await fetch(
-		`/api/panes/${encodeURIComponent(paneId)}/output?lines=${lines}&source=${source}`,
+		`${paneUrl(paneId, "output")}?lines=${lines}&source=${source}`,
 		{ signal },
 	);
 	if (!response.ok) {

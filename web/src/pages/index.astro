@@ -76,7 +76,7 @@
         type Session,
         type Tab,
       } from "../lib/api";
-      import { href, parseRoute } from "../lib/route";
+      import { href, parseRoute, type Route } from "../lib/route";
 
       const listEl = document.querySelector<HTMLDivElement>("#list")!;
       const logEl = document.querySelector<HTMLPreElement>("#log")!;
@@ -205,9 +205,8 @@
       /** The URL is the state: everything on screen is derived from it. */
       function render() {
         if (!session) return;
-        const route = parseRoute(location.pathname);
-        const tab = session.tabs.find((candidate) => candidate.id === route.tabId);
-        const pane = tab?.panes.find((candidate) => candidate.id === route.paneId) ?? null;
+        const { route, tab, pane: found } = current();
+        const pane = found ?? null;
 
         // A tab or pane can close between two renders; drop back rather than
         // leaving a dead target addressable in the composer.
@@ -257,12 +256,13 @@
         syncSend();
       }
 
-      /** The open pane, derived from the URL like everything else on screen. */
-      function currentPane(): Pane | undefined {
+      /** Everything on screen derives from the URL; this is the one place that
+       *  resolves it against the session. */
+      function current(): { route: Route; tab?: Tab; pane?: Pane } {
         const route = parseRoute(location.pathname);
-        return session?.tabs
-          .find((tab) => tab.id === route.tabId)
-          ?.panes.find((candidate) => candidate.id === route.paneId);
+        const tab = session?.tabs.find((candidate) => candidate.id === route.tabId);
+        const pane = tab?.panes.find((candidate) => candidate.id === route.paneId);
+        return { route, tab, pane };
       }
 
       /** With nothing typed the same button sends the Enter key, which only an
@@ -270,7 +270,7 @@
        *  With text, anyone can send: prompt handles shells with send_input. */
       function syncSend() {
         const empty = textEl.value.trim() === "";
-        sendEl.disabled = textEl.disabled || (empty && !currentPane()?.agent);
+        sendEl.disabled = textEl.disabled || (empty && !current().pane?.agent);
         sendEl.classList.toggle("empty", empty);
         const what = empty ? "Enter" : "Send";
         sendEl.title = what;
@@ -345,7 +345,7 @@
         what: string,
         run: (paneId: string) => Promise<void>,
       ) {
-        const pane = currentPane();
+        const pane = current().pane;
         if (!pane || button.disabled) return;
         button.disabled = true;
         say(`${what}…`);
