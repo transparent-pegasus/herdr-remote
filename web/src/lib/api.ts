@@ -63,6 +63,17 @@ export async function interruptPane(paneId: string): Promise<void> {
 	}
 }
 
+/** Enter to a pane, for the question an agent is already asking. */
+export async function pressEnter(paneId: string): Promise<void> {
+	const response = await fetch(
+		`/api/panes/${encodeURIComponent(paneId)}/enter`,
+		{ method: "POST" },
+	);
+	if (!response.ok) {
+		throw new Error(await reason(response, "could not send enter"));
+	}
+}
+
 /** Plain text, straight from the pane; the caller renders it verbatim.
  *  `truncated` says herdr held more than `lines` asked for. */
 export async function fetchOutput(

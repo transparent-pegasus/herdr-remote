@@ -52,10 +52,13 @@
             ><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"
           /></svg>
         </button>
-        <button type="submit" disabled aria-label="Send" title="Send">
-          <svg viewBox="0 0 24 24" aria-hidden="true"
+        <button type="submit" class="empty" disabled aria-label="Enter" title="Enter">
+          <svg class="send" viewBox="0 0 24 24" aria-hidden="true"
             ><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" /><path
               d="m21.854 2.147-10.94 10.939"
+          /></svg>
+          <svg class="enter" viewBox="0 0 24 24" aria-hidden="true"
+            ><polyline points="9 10 4 15 9 20" /><path d="M20 4v7a4 4 0 0 1-4 4H4"
           /></svg>
         </button>
       </div>
@@ -68,6 +71,7 @@
         isTransient,
         interruptPane,
         paneSubtitle,
+        pressEnter,
         sendPrompt,
         type Pane,
         type Session,
@@ -259,9 +263,15 @@
           ?.panes.find((candidate) => candidate.id === route.paneId);
       }
 
-      /** Send is the only action that needs something typed. */
+      /** With nothing typed the same button sends the Enter key, which is what
+       *  an agent waiting on its own question is asking for. */
       function syncSend() {
-        sendEl.disabled = textEl.disabled || textEl.value.trim() === "";
+        sendEl.disabled = textEl.disabled;
+        const empty = textEl.value.trim() === "";
+        sendEl.classList.toggle("empty", empty);
+        const what = empty ? "Enter" : "Send";
+        sendEl.title = what;
+        sendEl.setAttribute("aria-label", what);
       }
 
       function go(path: string, replace = false) {
@@ -347,10 +357,14 @@
       composerEl.addEventListener("submit", (event) => {
         event.preventDefault();
         const text = textEl.value.trim();
-        if (!text) return; // the button is disabled; this is the Enter path
+        if (!text) {
+          act(sendEl, "Enter", (id) => pressEnter(id));
+          return;
+        }
         act(sendEl, "message", async (id) => {
           await sendPrompt(id, text);
           textEl.value = "";
+          syncSend();
         });
       });
 
@@ -490,6 +504,12 @@
       }
       #go svg {
         fill: currentColor;
+      }
+      /* One button, two jobs: the paper plane once there is something to send,
+         the return arrow while the composer is empty. */
+      #actions button.empty .send,
+      #actions button:not(.empty) .enter {
+        display: none;
       }
       #actions button:disabled {
         opacity: 0.35;

@@ -196,13 +196,13 @@ pub async fn read(pane_id: &str, lines: u32, source: &str) -> Result<Output> {
     Ok(serde_json::from_value(read.clone())?)
 }
 
-/// Esc, straight to the terminal — the key an agent reads as "stop what you are
-/// doing". Deliberately not a general key-injection endpoint: this is the one
-/// key the phone needs that a prompt cannot express.
-pub async fn interrupt(pane_id: &str) -> Result<()> {
+/// A bare keypress, straight to the terminal — the two keys the phone needs
+/// that a prompt cannot express: esc to stop a turn, enter to answer a prompt
+/// the agent is already showing. Callers pick the key; nothing else does.
+pub async fn press(pane_id: &str, key: &str) -> Result<()> {
     call(
         "pane.send_keys",
-        json!({ "pane_id": pane_id, "keys": ["esc"] }),
+        json!({ "pane_id": pane_id, "keys": [key] }),
     )
     .await?;
     Ok(())

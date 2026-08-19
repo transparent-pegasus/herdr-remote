@@ -31,9 +31,18 @@ async fn session() -> ApiResult<Json<herdr::Session>> {
 /// Esc to a busy pane. Separate from `prompt` because it is a key, not text:
 /// an agent mid-turn is not reading its composer.
 async fn interrupt(Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
-    herdr::interrupt(&pane_id)
+    herdr::press(&pane_id, "esc")
         .await
         .map_err(failed("could not interrupt the pane"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Enter to a pane, for the same reason: an agent asking a yes/no question
+/// wants the key, and an empty composer has nothing else to send.
+async fn enter(Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
+    herdr::press(&pane_id, "enter")
+        .await
+        .map_err(failed("could not send enter to the pane"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -177,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/session", get(session))
         .route("/api/panes/{pane_id}/prompt", post(prompt))
         .route("/api/panes/{pane_id}/interrupt", post(interrupt))
+        .route("/api/panes/{pane_id}/enter", post(enter))
         .route("/api/panes/{pane_id}/output", get(output))
         // Without this, an unknown /api path would fall through to the UI and
         // answer a fetch with 200 and a page of HTML.
