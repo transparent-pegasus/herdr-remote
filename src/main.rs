@@ -133,14 +133,15 @@ struct Allowed(Arc<Vec<String>>);
 /// sends the attacker's own hostname as `Host` and cannot forge 127.0.0.1, so
 /// allowing it costs nothing. The address we bind is accepted for the same
 /// reason: reaching it already required a packet arriving on that interface.
-/// `ALLOWED_HOSTS` adds the tunnel's public hostname on top, comma-separated.
-fn allowed_hosts(bind: &str, port: &str) -> Vec<String> {
+/// `extra` (the ALLOWED_HOSTS env var, read by main) adds the tunnel's public
+/// hostname on top, comma-separated.
+fn allowed_hosts(bind: &str, port: &str, extra: Option<&str>) -> Vec<String> {
     let mut hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}")];
     let own = format!("{}:{port}", bind.trim().to_ascii_lowercase());
     if !hosts.contains(&own) {
         hosts.push(own);
     }
-    if let Ok(list) = std::env::var("ALLOWED_HOSTS") {
+    if let Some(list) = extra {
         hosts.extend(
             list.split(',')
                 .map(|host| host.trim().to_ascii_lowercase())
@@ -187,7 +188,8 @@ async fn main() -> anyhow::Result<()> {
              drive your panes."
         );
     }
-    let allowed = Allowed(Arc::new(allowed_hosts(&bind, &port)));
+    let extra = std::env::var("ALLOWED_HOSTS").ok();
+    let allowed = Allowed(Arc::new(allowed_hosts(&bind, &port, extra.as_deref())));
     println!("accepting Host: {:?}", allowed.0);
 
     let app = Router::new()
@@ -230,9 +232,7 @@ mod tests {
 
     #[test]
     fn unset_allows_only_loopback() {
-        // SAFETY: single-threaded test process, no other thread reads the env.
-        unsafe { std::env::remove_var("ALLOWED_HOSTS") };
-        let allowed = allowed_hosts("127.0.0.1", "8787");
+        let allowed = allowed_hosts("127.0.0.1", "8787", None);
         assert!(host_allowed("127.0.0.1:8787", &allowed));
         assert!(host_allowed("localhost:8787", &allowed));
         // The rebinding case: an attacker name pointed at 127.0.0.1.
@@ -245,10 +245,8 @@ mod tests {
 
     #[test]
     fn the_bound_address_is_accepted_without_extra_config() {
-        // SAFETY: single-threaded test process, no other thread reads the env.
-        unsafe { std::env::remove_var("ALLOWED_HOSTS") };
         // The private-network case: an alias on `lo`, reachable only via the tunnel.
-        let allowed = allowed_hosts("10.99.99.1", "8787");
+        let allowed = allowed_hosts("10.99.99.1", "8787", None);
         assert!(host_allowed("10.99.99.1:8787", &allowed));
         // Local work still reaches it, and the guard still holds.
         assert!(host_allowed("127.0.0.1:8787", &allowed));
@@ -257,9 +255,9 @@ mod tests {
 
     #[test]
     fn configured_hosts_join_loopback_and_match_case_insensitively() {
-        let allowed = ["127.0.0.1:8787", "herdr.example.com"].map(String::from);
-        assert!(host_allowed("Herdr.Example.COM", &allowed));
-        assert!(host_allowed(" herdr.example.com ", &allowed));
+        let allowed = allowed_hosts("127.0.0.1", "8787", Some(" Herdr.Example.COM ,, "));
+        assert!(host_allowed("herdr.example.com", &allowed));
+        assert!(host_allowed("HERDR.EXAMPLE.COM", &allowed));
         // A suffix is not a match, and local work still reaches the server.
         assert!(!host_allowed("herdr.example.com.evil.net", &allowed));
         assert!(host_allowed("127.0.0.1:8787", &allowed));
