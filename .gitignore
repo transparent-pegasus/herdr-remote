@@ -3,5 +3,6 @@ CLAUDE.local.md
 node_modules/
 web/dist/
 web/.astro/
-.tmp/
 .env
+.tmp/
+.wrangler/

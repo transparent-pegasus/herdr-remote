@@ -34,7 +34,35 @@ make run               # build the UI, serve on 127.0.0.1:8787
 
 ## Deployment
 
-Create a remotely-managed tunnel in the Cloudflare Zero Trust dashboard, point its public hostname at `http://127.0.0.1:8787`, put Access in front of it, and put the tunnel token in `.env`. Then:
+Create the Access application **before** the tunnel's public hostname: between
+publishing a hostname and protecting it, anyone holding the URL can drive your
+panes. Access apps can be created for a hostname that does not resolve yet.
+
+1. Zero Trust -> Access -> Applications -> Add an application -> Self-hosted.
+   Domain `herdr.example.com`, policy Allow / Emails / your address.
+2. Zero Trust -> Networks -> Tunnels -> Create a tunnel -> Cloudflared. Copy the
+   token out of the install command.
+3. That tunnel's Public Hostname tab: `herdr.example.com` -> HTTP ->
+   `127.0.0.1:8787`. The CNAME is created for you.
+4. Put the token and the hostname in `.env`:
+
+```
+CLOUDFLARE_TUNNEL_TOKEN=<token>
+ALLOWED_HOSTS=herdr.example.com
+```
+
+`ALLOWED_HOSTS` is a Host-header allowlist. Access guards the tunnel, not this
+socket: a page using DNS rebinding resolves its own hostname to `127.0.0.1` and
+is then same-origin, so CORS does not apply — but it still sends that hostname
+as `Host`, and an unlisted `Host` gets 403. Loopback is always allowed, so
+`make run` works whether or not this is set. `make deploy` refuses to start
+without it, since every tunnel request would otherwise 403.
+
+A public hostname needs a domain on your Cloudflare account; `*.trycloudflare.com`
+cannot carry Access. Without one, use Zero Trust's Private Network with the WARP
+client on the phone instead.
+
+Then:
 
 ```bash
 make deploy   # release build, then wrangler serving the tunnel

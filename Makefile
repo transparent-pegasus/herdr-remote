@@ -39,6 +39,7 @@ check: deps ## everything: deps, test, lint, format — logged to .tmp/*.log
 
 deploy: web ## build release, expose it through the cloudflare tunnel
 	@test -n "$$CLOUDFLARE_TUNNEL_TOKEN" || { echo "CLOUDFLARE_TUNNEL_TOKEN unset — cp .env.example .env and fill it"; exit 1; }
+	@test -n "$$ALLOWED_HOSTS" || { echo "ALLOWED_HOSTS unset — the tunnel would get 403 on every request; set it to your public hostname in .env"; exit 1; }
 	cargo build --release
 	@$(BIN) & trap "kill $$!" EXIT; wrangler tunnel run --token "$$CLOUDFLARE_TUNNEL_TOKEN"
 
