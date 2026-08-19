@@ -179,7 +179,10 @@
               // An agent redraws its screen in place: asking for scrollback
               // there returns redraw history that differs on every read, so the
               // log would never settle. Its screen is all it has anyway.
-              pane.agent ? "screen" : "scrollback",
+              // Read it fresh rather than from the pane this watch started on:
+              // attaching an agent to the pane already open is an ordinary
+              // move, and the session poll sees it while the id never changes.
+              current().pane?.agent ? "screen" : "scrollback",
               AbortSignal.timeout(15000),
             );
             if (mine !== watches) return; // a later pane already owns the view

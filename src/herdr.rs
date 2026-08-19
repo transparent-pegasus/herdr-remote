@@ -195,13 +195,19 @@ pub async fn read(pane_id: &str, lines: u32, source: &str) -> Result<Output> {
     Ok(serde_json::from_value(read.clone())?)
 }
 
-/// A bare keypress, straight to the terminal — the two keys the phone needs
-/// that a prompt cannot express: esc to stop a turn, enter to answer a prompt
-/// the agent is already showing. Callers pick the key; nothing else does.
+/// A bare keypress for the two keys a prompt cannot express: esc to stop a
+/// turn, enter to answer a question the agent is already showing.
+///
+/// Addressed to the *agent*, not to the pane. `pane.send_keys` would deliver
+/// the key wherever that pane happens to point by the time it arrives, and a
+/// pane whose agent exited in that window is a shell that would execute
+/// whatever sits on its command line. herdr resolves an `agent.send_keys`
+/// target atomically and answers `agent_not_found` instead, so the caller's
+/// own agent check cannot go stale between the check and the key.
 pub async fn press(pane_id: &str, key: &str) -> Result<()> {
     call(
-        "pane.send_keys",
-        json!({ "pane_id": pane_id, "keys": [key] }),
+        "agent.send_keys",
+        json!({ "target": pane_id, "keys": [key] }),
     )
     .await?;
     Ok(())
@@ -306,14 +312,14 @@ mod tests {
     async fn eof_before_any_reply_is_an_error() {
         let path = fake_herdr(b"");
         let error = probe(&path).await.unwrap_err();
-        assert!(error.to_string().contains("closed before replying"));
+        assert!(error.to_string().contains("socket closed before replying"));
     }
 
     #[tokio::test]
     async fn a_frame_without_its_newline_is_truncated() {
         let path = fake_herdr(b"{\"id\":\"herdr-remote\",\"result\":{}}");
         let error = probe(&path).await.unwrap_err();
-        assert!(error.to_string().contains("truncated"));
+        assert!(error.to_string().contains("reply was truncated"));
     }
 
     #[tokio::test]
@@ -321,21 +327,21 @@ mod tests {
         let path =
             fake_herdr(b"{\"id\":\"herdr-remote\",\"error\":{\"code\":\"x\",\"message\":\"y\"}}\n");
         let error = probe(&path).await.unwrap_err();
-        assert!(error.to_string().contains("failed"));
+        assert!(error.to_string().contains("herdr ping failed"));
     }
 
     #[tokio::test]
     async fn a_reply_with_a_foreign_id_is_rejected() {
         let path = fake_herdr(b"{\"id\":\"someone-else\",\"result\":{}}\n");
         let error = probe(&path).await.unwrap_err();
-        assert!(error.to_string().contains("foreign id"));
+        assert!(error.to_string().contains("reply carried a foreign id"));
     }
 
     #[tokio::test]
     async fn a_reply_missing_its_result_is_rejected() {
         let path = fake_herdr(b"{\"id\":\"herdr-remote\"}\n");
         let error = probe(&path).await.unwrap_err();
-        assert!(error.to_string().contains("no result"));
+        assert!(error.to_string().contains("herdr ping returned no result"));
     }
 
     #[test]
