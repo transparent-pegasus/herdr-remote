@@ -41,39 +41,20 @@ make run               # build the UI, serve on 127.0.0.1:8787
 
 ## Deployment
 
-Create the Access application **before** the tunnel's public hostname: between
-publishing a hostname and protecting it, anyone holding the URL can drive your
-panes. Access apps can be created for a hostname that does not resolve yet.
-
-1. Zero Trust -> Access -> Applications -> Add an application -> Self-hosted.
-   Domain `herdr.example.com`, policy Allow / Emails / your address.
-2. Zero Trust -> Networks -> Tunnels -> Create a tunnel -> Cloudflared. Copy the
-   token out of the install command.
-3. That tunnel's Public Hostname tab: `herdr.example.com` -> HTTP ->
-   `127.0.0.1:8787`. The CNAME is created for you.
-4. Put the token and the hostname in `.env`:
-
-```
-CLOUDFLARE_TUNNEL_TOKEN=<token>
-ALLOWED_HOSTS=herdr.example.com
-```
-
-`ALLOWED_HOSTS` is a Host-header allowlist. Access guards the tunnel, not this
-socket: a page using DNS rebinding resolves its own hostname to `127.0.0.1` and
-is then same-origin, so CORS does not apply — but it still sends that hostname
-as `Host`, and an unlisted `Host` gets 403. Loopback is always allowed, so
-`make run` works whether or not this is set. `make deploy` refuses to start
-without it, since every tunnel request would otherwise 403.
-
-A public hostname needs a domain on your Cloudflare account; `*.trycloudflare.com`
-cannot carry Access. Without one, see **Private network** below.
+Two routes in. The private network below is the one this repo was set up and
+tested on. The public hostname route needs a domain on your Cloudflare account
+and is written from Cloudflare's docs, not from a run here.
 
 ### Private network (no domain)
 
-Zero Trust can route an IP range to WARP-enrolled devices instead of publishing a
-hostname, which needs no domain, no DNS, and no Access application. Both sides
-still dial out to Cloudflare's edge, so the phone does not have to share a network
-with this machine.
+Zero Trust can route an IP range to devices running the Cloudflare One Client
+(formerly WARP) instead of publishing a hostname, which needs no domain, no
+DNS, and no Access application. Both sides still dial out to Cloudflare's edge,
+so the phone does not have to share a network with this machine.
+
+No Access application sits in front of the server here and Gateway network
+policies default to allow, so device enrollment is the whole access boundary —
+restrict it first, before the tunnel exists.
 
 The catch is that the phone reaches the server *by address*, and `127.0.0.1` is the
 phone's own loopback — it never enters the tunnel. Binding a LAN interface would
@@ -91,26 +72,64 @@ persisting it separately is optional. Pick a range that collides with neither th
 machine's networks nor whatever network the phone is on. `BIND_ADDR` joins the
 Host allowlist automatically, so `ALLOWED_HOSTS` stays empty here.
 
-Then, in Zero Trust:
+Then, in the Cloudflare dashboard:
 
-1. Networks -> Tunnels -> your tunnel -> **Routes** (labelled Private Network in
-   older dashboards) -> add `10.99.99.1/32`. Leave Public Hostname alone.
-2. Settings -> WARP Client -> Device enrollment permissions -> allow your address.
-   **This is the real access boundary** — Gateway network policies default to
-   allow, so enrollment is what keeps strangers out. Add Gateway -> Firewall
-   Policies -> Network rules only to narrow it further.
-3. Install the Cloudflare One app on the phone, log in with your team name, enrol.
-4. Browse to `http://10.99.99.1:8787`.
+1. Zero Trust -> Team & Resources -> Devices -> Management -> Device enrollment
+   -> Manage -> Create new policy, selector Emails, value your address.
+   **This is the real access boundary.** Narrow it further under Zero Trust ->
+   Traffic policies -> Firewall policies -> Network only if you want to.
+2. Networking -> Tunnels -> Create Tunnel, name it, and copy the token out of
+   the install command into `.env` as `CLOUDFLARE_TUNNEL_TOKEN`.
+3. That tunnel -> Routes -> Add route -> Private CIDR, network CIDR
+   `10.99.99.1/32`.
+4. Zero Trust -> Team & Resources -> Devices -> Device profiles -> Default ->
+   Edit -> Split Tunnels -> Manage -> delete `10.0.0.0/4`. The client excludes
+   that range by default, so the route is unreachable until the entry goes —
+   and everything else in it now travels the tunnel too.
+5. Install Cloudflare One Agent on the phone (the app formerly published as
+   1.1.1.1 / WARP), log in with the team name from Zero Trust -> Settings ->
+   Team name and domain, and enrol.
+6. `make deploy` below, then browse to `http://10.99.99.1:8787`.
 
-The trade against a public hostname: WARP must stay connected on the phone, and it
-occupies the device's VPN slot.
+The trade against a public hostname: the client must stay connected on the
+phone, and it occupies the device's VPN slot.
 
-Then:
+### Public hostname (not run here)
+
+Needs a domain on your Cloudflare account; `*.trycloudflare.com` cannot carry
+Access. Create the Access application **before** the tunnel's public hostname:
+between publishing a hostname and protecting it, anyone holding the URL can
+drive your panes. Access apps can be created for a hostname that does not
+resolve yet.
+
+1. Zero Trust -> Access controls -> Applications -> Create new application ->
+   Self-hosted and private -> Add public hostname `herdr.example.com`, policy
+   Allow / Emails / your address.
+2. Networking -> Tunnels -> Create Tunnel, name it, copy the token out of the
+   install command.
+3. That tunnel -> Routes -> Add route -> Published application:
+   `herdr.example.com`, service URL `http://127.0.0.1:8787`. The CNAME is
+   created for you.
+4. Put the token and the hostname in `.env`:
+
+```
+CLOUDFLARE_TUNNEL_TOKEN=<token>
+ALLOWED_HOSTS=herdr.example.com
+```
+
+`ALLOWED_HOSTS` is a Host-header allowlist. Access guards the tunnel, not this
+socket: a page using DNS rebinding resolves its own hostname to `127.0.0.1` and
+is then same-origin, so CORS does not apply — but it still sends that hostname
+as `Host`, and an unlisted `Host` gets 403. Loopback is always allowed, so
+`make run` works whether or not this is set. `make deploy` refuses to start
+without it, since every tunnel request would otherwise 403.
+
+### Running it
 
 ```bash
 make deploy   # release build, then wrangler serving the tunnel
 ```
 
-Needs `wrangler` on PATH — it ships its own `cloudflared`, so that does not need installing separately. The server binds loopback only; never bind `0.0.0.0`.
+Needs `wrangler` on PATH — it ships its own `cloudflared`, so that does not need installing separately. The server binds loopback, or the `lo` alias above, only; never bind `0.0.0.0`.
 
 `wrangler tunnel quick-start http://127.0.0.1:8787` gives a throwaway public URL with no Cloudflare Access in front of it. Handy for a one-off check, never for leaving running: anyone with the URL can drive your panes.
