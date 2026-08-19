@@ -52,6 +52,17 @@ export async function sendPrompt(paneId: string, text: string): Promise<void> {
 
 export type Output = { text: string; truncated: boolean };
 
+/** Esc to a pane that is mid-turn. */
+export async function interruptPane(paneId: string): Promise<void> {
+	const response = await fetch(
+		`/api/panes/${encodeURIComponent(paneId)}/interrupt`,
+		{ method: "POST" },
+	);
+	if (!response.ok) {
+		throw new Error(await reason(response, "could not interrupt"));
+	}
+}
+
 /** Plain text, straight from the pane; the caller renders it verbatim.
  *  `truncated` says herdr held more than `lines` asked for. */
 export async function fetchOutput(

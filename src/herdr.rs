@@ -196,6 +196,18 @@ pub async fn read(pane_id: &str, lines: u32, source: &str) -> Result<Output> {
     Ok(serde_json::from_value(read.clone())?)
 }
 
+/// Esc, straight to the terminal — the key an agent reads as "stop what you are
+/// doing". Deliberately not a general key-injection endpoint: this is the one
+/// key the phone needs that a prompt cannot express.
+pub async fn interrupt(pane_id: &str) -> Result<()> {
+    call(
+        "pane.send_keys",
+        json!({ "pane_id": pane_id, "keys": ["esc"] }),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Agent panes take a prompt; a plain shell needs the text plus a newline.
 /// `None` when no such pane exists, so the caller can answer 404.
 pub async fn prompt(pane_id: &str, text: &str) -> Result<Option<()>> {
