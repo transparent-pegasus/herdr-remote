@@ -66,8 +66,44 @@ as `Host`, and an unlisted `Host` gets 403. Loopback is always allowed, so
 without it, since every tunnel request would otherwise 403.
 
 A public hostname needs a domain on your Cloudflare account; `*.trycloudflare.com`
-cannot carry Access. Without one, use Zero Trust's Private Network with the WARP
-client on the phone instead.
+cannot carry Access. Without one, see **Private network** below.
+
+### Private network (no domain)
+
+Zero Trust can route an IP range to WARP-enrolled devices instead of publishing a
+hostname, which needs no domain, no DNS, and no Access application. Both sides
+still dial out to Cloudflare's edge, so the phone does not have to share a network
+with this machine.
+
+The catch is that the phone reaches the server *by address*, and `127.0.0.1` is the
+phone's own loopback — it never enters the tunnel. Binding a LAN interface would
+work but publishes the server to everyone on that LAN, where nothing authenticates.
+Bind an alias on `lo` instead: reachable from this host, and so from cloudflared,
+but never from the LAN.
+
+```
+BIND_ADDR=10.99.99.1
+```
+
+`make run` and `make deploy` add that address to `lo` themselves when it is
+missing, asking for sudo only then — an alias does not survive a reboot, so
+persisting it separately is optional. Pick a range that collides with neither this
+machine's networks nor whatever network the phone is on. `BIND_ADDR` joins the
+Host allowlist automatically, so `ALLOWED_HOSTS` stays empty here.
+
+Then, in Zero Trust:
+
+1. Networks -> Tunnels -> your tunnel -> **Routes** (labelled Private Network in
+   older dashboards) -> add `10.99.99.1/32`. Leave Public Hostname alone.
+2. Settings -> WARP Client -> Device enrollment permissions -> allow your address.
+   **This is the real access boundary** — Gateway network policies default to
+   allow, so enrollment is what keeps strangers out. Add Gateway -> Firewall
+   Policies -> Network rules only to narrow it further.
+3. Install the Cloudflare One app on the phone, log in with your team name, enrol.
+4. Browse to `http://10.99.99.1:8787`.
+
+The trade against a public hostname: WARP must stay connected on the phone, and it
+occupies the device's VPN slot.
 
 Then:
 

@@ -65,10 +65,15 @@ struct Allowed(Arc<Vec<String>>);
 
 /// Loopback is always accepted so `make run` keeps working; a rebinding page
 /// sends the attacker's own hostname as `Host` and cannot forge 127.0.0.1, so
-/// allowing it costs nothing. `ALLOWED_HOSTS` adds the tunnel's public
-/// hostname on top, comma-separated.
-fn allowed_hosts(port: &str) -> Vec<String> {
+/// allowing it costs nothing. The address we bind is accepted for the same
+/// reason: reaching it already required a packet arriving on that interface.
+/// `ALLOWED_HOSTS` adds the tunnel's public hostname on top, comma-separated.
+fn allowed_hosts(bind: &str, port: &str) -> Vec<String> {
     let mut hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    let own = format!("{}:{port}", bind.trim().to_ascii_lowercase());
+    if !hosts.contains(&own) {
+        hosts.push(own);
+    }
     if let Ok(list) = std::env::var("ALLOWED_HOSTS") {
         hosts.extend(
             list.split(',')
@@ -105,7 +110,18 @@ async fn guard_host(State(allowed): State<Allowed>, request: Request, next: Next
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8787".into());
-    let allowed = Allowed(Arc::new(allowed_hosts(&port)));
+    // Default loopback. A Zero Trust private-network route needs an address the
+    // WARP client can be routed to, so bind an alias on `lo` (see README) rather
+    // than a LAN interface, which would also publish the server to the LAN.
+    let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".into());
+    if bind == "0.0.0.0" || bind == "::" {
+        eprintln!(
+            "WARNING: BIND_ADDR={bind} listens on every interface. Nothing in front \
+             of this socket authenticates; anyone who can route to this host can \
+             drive your panes."
+        );
+    }
+    let allowed = Allowed(Arc::new(allowed_hosts(&bind, &port)));
     println!("accepting Host: {:?}", allowed.0);
 
     let app = Router::new()
@@ -121,8 +137,9 @@ async fn main() -> anyhow::Result<()> {
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(middleware::from_fn_with_state(allowed, guard_host));
 
-    // loopback only: the tunnel is the sole ingress
-    let addr = format!("127.0.0.1:{port}");
+    // The tunnel is the sole intended ingress; the bind address decides who else
+    // can even open a socket.
+    let addr = format!("{bind}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");
     axum::serve(listener, app).await?;
@@ -137,7 +154,7 @@ mod tests {
     fn unset_allows_only_loopback() {
         // SAFETY: single-threaded test process, no other thread reads the env.
         unsafe { std::env::remove_var("ALLOWED_HOSTS") };
-        let allowed = allowed_hosts("8787");
+        let allowed = allowed_hosts("127.0.0.1", "8787");
         assert!(host_allowed("127.0.0.1:8787", &allowed));
         assert!(host_allowed("localhost:8787", &allowed));
         // The rebinding case: an attacker name pointed at 127.0.0.1.
@@ -146,6 +163,18 @@ mod tests {
         assert!(!host_allowed("127.0.0.1:9999", &allowed));
         // No Host header at all.
         assert!(!host_allowed("", &allowed));
+    }
+
+    #[test]
+    fn the_bound_address_is_accepted_without_extra_config() {
+        // SAFETY: single-threaded test process, no other thread reads the env.
+        unsafe { std::env::remove_var("ALLOWED_HOSTS") };
+        // The private-network case: an alias on `lo`, reachable only via the tunnel.
+        let allowed = allowed_hosts("10.99.99.1", "8787");
+        assert!(host_allowed("10.99.99.1:8787", &allowed));
+        // Local work still reaches it, and the guard still holds.
+        assert!(host_allowed("127.0.0.1:8787", &allowed));
+        assert!(!host_allowed("evil.example.com", &allowed));
     }
 
     #[test]
