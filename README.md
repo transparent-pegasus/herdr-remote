@@ -11,10 +11,13 @@ Single Rust binary (Axum) serving the API and the static Astro UI from `web/dist
 ## API
 
 ```
-GET  /api/health                   # "ok"
-GET  /api/session                  # {"tabs":[{"id","label","panes":[{"id","label","agent","state"}]}]}
-POST /api/panes/{pane_id}/prompt   # {"text": "..."} -> 204, or 404 for an unknown pane
-GET  /api/panes/{pane_id}/output   # the pane's last 300 lines, as plain text
+GET  /api/health                     # "ok"
+GET  /api/session                    # {"tabs":[{"id","label","panes":[{"id","label","agent","state"}]}]}
+POST /api/panes/{pane_id}/prompt     # {"text": "..."} -> 204; 404 for an unknown pane
+POST /api/panes/{pane_id}/interrupt  # Esc to an agent's turn -> 204; 403 for a shell pane, 404 unknown
+POST /api/panes/{pane_id}/enter      # Enter, for the question an agent is showing; same rules
+GET  /api/panes/{pane_id}/output     # plain text; ?lines=1..20000 (default 300),
+                                     # ?source=scrollback|screen; x-truncated: true when more remains
 ```
 
 `/api/session` reshapes Herdr's `session.snapshot` rather than forwarding it, so a
@@ -27,6 +30,10 @@ and an unknown `/api` path still 404s instead of handing a fetch a page of HTML.
 
 `prompt` picks its Herdr call per pane: `agent.prompt` where an agent is attached,
 otherwise `pane.send_input` with a trailing `enter`.
+
+The bare-key routes are agent-only, enforced server-side: a shell pane would
+execute whatever sits on its command line, so the server answers 403 rather
+than trusting the UI's disabled buttons.
 
 ## Development
 
