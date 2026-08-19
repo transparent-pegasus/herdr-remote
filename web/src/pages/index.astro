@@ -27,7 +27,6 @@
       <textarea
         id="text"
         rows="4"
-        enterkeyhint="send"
         disabled
         placeholder="Type an instruction…"></textarea>
       <div id="actions">
@@ -491,8 +490,9 @@
         border-top: 1px solid var(--edge);
         background: Canvas;
       }
-      /* Disabled is a state, not a hidden panel: it stays in place and says why. */
-      #composer:has(:disabled) {
+      /* Disabled-for-lack-of-a-pane dims the panel; a single disabled button
+         (stop on an idle agent, say) is its own 0.35 opacity, not the panel's. */
+      #composer:has(textarea:disabled) {
         opacity: 0.55;
       }
       #target {
@@ -539,9 +539,7 @@
       #actions button:disabled {
         opacity: 0.35;
       }
-      #composer button,
-      #refresh,
-      #back {
+      #composer button {
         min-height: 44px;
         padding: 0.75rem;
         border: 1px solid var(--edge);
@@ -552,19 +550,22 @@
       }
       /* 24px is the WCAG 2.2 AA floor (2.5.8), below Apple's 44pt guidance —
          a deliberate trade for a header that does not dominate a phone screen.
-         Fixed height rather than min-height, and line-height 1: the two arrow
-         glyphs have different intrinsic heights, so anything content-driven
-         leaves the pair mismatched. */
+         Fixed height and line-height 1: the two arrow glyphs have different
+         intrinsic heights, so anything content-driven leaves the pair
+         mismatched. */
       #refresh,
       #back {
         box-sizing: border-box;
         display: grid;
         place-items: center;
         height: 24px;
-        /* min-height wins over height, and the shared rule above sets 44px. */
-        min-height: 0;
         min-width: 24px;
         padding: 0 0.35rem;
+        border: 1px solid var(--edge);
+        border-radius: 0.5rem;
+        background: none;
+        color: inherit;
+        font: inherit;
         font-size: 0.85rem;
         line-height: 1;
         text-decoration: none;
