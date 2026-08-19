@@ -97,6 +97,8 @@
       const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
 
       const POLL_MS = 3000;
+      /** The session is smaller and changes slower than pane output. */
+      const SESSION_POLL_MS = 5000;
       /** Matches the server default; each "earlier output" widens the window. */
       const LINES = 300;
       const MAX_LINES = 20000;
@@ -104,8 +106,9 @@
       let session: Session | null = null;
       let watching: string | null = null;
       let timer: ReturnType<typeof setInterval> | undefined;
-      let retry: ReturnType<typeof setTimeout> | undefined;
-      let loads = 0;
+      let sessionJson = "";
+      let loading = false;
+      let sessionFailed = false;
       let watches = 0;
       let lines = LINES;
       let painted = "";
@@ -281,23 +284,35 @@
       }
 
       async function load() {
-        const mine = ++loads;
-        clearTimeout(retry);
-        say("Loading…");
+        // Single flight: a request is allowed 15 s, the tick fires every 5 s.
+        // Lapping it would mean every slow success arrives pre-superseded and
+        // the session never lands on a slow tunnel — the case the poll exists for.
+        if (loading) return;
+        loading = true;
         try {
           const fresh = await fetchSession(AbortSignal.timeout(15000));
-          if (mine !== loads) return; // a newer reload already painted
-          session = fresh;
+          // Touch only messages this function owns: "Loading…" (boot and manual
+          // refresh) and its own earlier failure. watch()'s errors are its
+          // business — wiping them here would flicker a genuinely failing pane
+          // read every 5 s.
           if (statusEl.textContent === "Loading…") {
             say(fresh.tabs.length ? "" : "No panes.");
+          } else if (sessionFailed) {
+            say(""); // our own recovery; watch re-asserts its errors within 3 s
           }
-          render();
+          sessionFailed = false;
+          // Same bytes, same DOM — the steady poll must not churn the list.
+          const json = JSON.stringify(fresh);
+          if (json !== sessionJson) {
+            sessionJson = json;
+            session = fresh;
+            render();
+          }
         } catch (error) {
-          if (mine !== loads) return;
+          sessionFailed = true;
           complain(error, "Could not load.");
-          // Stay connected for as long as the page is in front. A backgrounded
-          // tab stops instead, and visibilitychange picks it back up.
-          if (!document.hidden) retry = setTimeout(load, POLL_MS);
+        } finally {
+          loading = false;
         }
       }
 
@@ -306,6 +321,11 @@
       document.addEventListener("visibilitychange", () => {
         if (!document.hidden) load();
       });
+      // The steady poll is also the retry: a failed load is simply stale until
+      // the next tick, and a backgrounded tab polls nothing.
+      setInterval(() => {
+        if (!document.hidden) load();
+      }, SESSION_POLL_MS);
 
       // Same-origin links move the app, not the browser. Modified clicks keep
       // their usual meaning (new tab, download).
@@ -377,7 +397,11 @@
         say("Reading further back…");
       });
 
-      refreshEl.addEventListener("click", load);
+      refreshEl.addEventListener("click", () => {
+        say("Loading…");
+        load();
+      });
+      say("Loading…");
       load();
     </script>
 
