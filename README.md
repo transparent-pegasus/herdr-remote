@@ -16,6 +16,8 @@ GET  /api/session                    # {"tabs":[{"id","label","panes":[{"id","la
 POST /api/panes/{pane_id}/prompt     # {"text": "..."} -> 204; 404 for an unknown pane
 POST /api/panes/{pane_id}/interrupt  # Esc to an agent's turn -> 204; 403 for a shell pane, 404 unknown
 POST /api/panes/{pane_id}/enter      # Enter, for the question an agent is showing; same rules
+POST /api/panes/{pane_id}/up         # Up, to move the selection in it; same rules
+POST /api/panes/{pane_id}/down       # Down, likewise
 GET  /api/panes/{pane_id}/output     # plain text; ?lines=1..20000 (default 300),
                                      # ?source=scrollback|screen; x-truncated: true when more remains
 ```

@@ -72,6 +72,11 @@ export const interruptPane = (paneId: string): Promise<void> =>
 export const pressEnter = (paneId: string): Promise<void> =>
 	post(paneUrl(paneId, "enter"), "could not send enter");
 
+/** Up and down move the selection in the menu an agent is showing; the key
+ *  name doubles as the route, as it does for the other bare keys. */
+export const pressArrow = (paneId: string, key: "up" | "down"): Promise<void> =>
+	post(paneUrl(paneId, key), `could not send ${key}`);
+
 export type Output = { text: string; truncated: boolean };
 
 /** Plain text, straight from the pane; the caller renders it verbatim.
