@@ -70,6 +70,7 @@
       let loads = 0;
       let watches = 0;
       let lines = LINES;
+      let painted = "";
 
       function say(message: string, failed = false) {
         statusEl.textContent = message;
@@ -107,10 +108,15 @@
       // Reading the tail is the point, so follow it — unless the reader has
       // scrolled up, in which case leave them where they are.
       function paint(text: string) {
+        // Rewriting textContent drops the scroll position, so an unchanged poll
+        // used to yank the view every few seconds. Same bytes, same DOM.
+        if (text === painted) return;
         const following =
           logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 8;
+        const top = logEl.scrollTop;
+        painted = text;
         logEl.textContent = text;
-        if (following) logEl.scrollTop = logEl.scrollHeight;
+        logEl.scrollTop = following ? logEl.scrollHeight : top;
       }
 
       /** Poll the open pane's output; one pane is watched at a time. */
@@ -119,6 +125,7 @@
         watching = pane?.id ?? null;
         // Each pane starts from the small window; widening is per visit.
         lines = LINES;
+        painted = "";
         moreEl.hidden = true;
         if (!pane) return;
 
@@ -129,6 +136,10 @@
             const output = await fetchOutput(
               pane.id,
               lines,
+              // An agent redraws its screen in place: asking for scrollback
+              // there returns redraw history that differs on every read, so the
+              // log would never settle. Its screen is all it has anyway.
+              pane.agent ? "screen" : "scrollback",
               AbortSignal.timeout(15000),
             );
             if (mine !== watches) return; // a later pane already owns the view

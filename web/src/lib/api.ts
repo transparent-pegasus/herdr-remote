@@ -57,10 +57,11 @@ export type Output = { text: string; truncated: boolean };
 export async function fetchOutput(
 	paneId: string,
 	lines: number,
+	source: "scrollback" | "screen",
 	signal?: AbortSignal,
 ): Promise<Output> {
 	const response = await fetch(
-		`/api/panes/${encodeURIComponent(paneId)}/output?lines=${lines}`,
+		`/api/panes/${encodeURIComponent(paneId)}/output?lines=${lines}&source=${source}`,
 		{ signal },
 	);
 	if (!response.ok) {

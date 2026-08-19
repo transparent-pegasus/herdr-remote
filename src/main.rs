@@ -51,6 +51,27 @@ const MAX_OUTPUT_LINES: u32 = 20_000;
 #[derive(Deserialize)]
 struct Window {
     lines: Option<u32>,
+    #[serde(default)]
+    source: Source,
+}
+
+/// Named for what the caller wants, not for herdr's vocabulary: a pane whose
+/// screen is redrawn in place has no useful history to follow.
+#[derive(Deserialize, Default, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum Source {
+    #[default]
+    Scrollback,
+    Screen,
+}
+
+impl Source {
+    fn as_herdr(self) -> &'static str {
+        match self {
+            Source::Scrollback => "recent",
+            Source::Screen => "visible",
+        }
+    }
 }
 
 /// Plain text, not JSON: the body is the pane's output and nothing else, so it
@@ -65,7 +86,7 @@ async fn output(
         .lines
         .unwrap_or(OUTPUT_LINES)
         .clamp(1, MAX_OUTPUT_LINES);
-    let output = herdr::read(&pane_id, lines)
+    let output = herdr::read(&pane_id, lines, window.source.as_herdr())
         .await
         .map_err(failed("could not read the pane"))?;
     Ok(([("x-truncated", output.truncated.to_string())], output.text))

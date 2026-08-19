@@ -178,14 +178,18 @@ pub struct Output {
     pub truncated: bool,
 }
 
-/// The pane's recent output, ANSI already stripped by herdr. `lines` bounds what
-/// a phone has to download and paint. Note an agent pane running a full-screen
-/// TUI has no scrollback at all: it reports only the current screen, however
-/// large a window is asked for.
-pub async fn read(pane_id: &str, lines: u32) -> Result<Output> {
+/// The pane's output, ANSI already stripped by herdr. `lines` bounds what a
+/// phone has to download and paint.
+///
+/// `source` matters more than it looks. `recent` is the scrollback a shell pane
+/// wants, but for a pane running a full-screen TUI it returns redraw history
+/// that churns on every read even when the screen is unchanged — a log that
+/// never settles. `visible` returns just the current screen, byte-identical
+/// between reads, which is the whole of what such a pane has anyway.
+pub async fn read(pane_id: &str, lines: u32, source: &str) -> Result<Output> {
     let result = call(
         "pane.read",
-        json!({ "pane_id": pane_id, "source": "recent", "lines": lines }),
+        json!({ "pane_id": pane_id, "source": source, "lines": lines }),
     )
     .await?;
     let read = result.get("read").context("pane.read returned no read")?;
