@@ -67,11 +67,11 @@ assignments:
   task-review:
     role: reviewer
     mode: delegate
-    enabled: true
+    enabled: disabled
   fix-round-re-review:
     role: reviewer
     mode: delegate
-    enabled: true
+    enabled: disabled
   final-branch-review:
     role: reviewer
     mode: delegate

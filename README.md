@@ -19,12 +19,20 @@ POST /api/panes/:pane_id/prompt    # {"text": "..."}
 ## Development
 
 ```bash
-cd web && aube install && aube run build   # build UI
-cargo run                                  # serve on 127.0.0.1:8787
+cp .env.example .env   # once
+make run               # build the UI, serve on 127.0.0.1:8787
 ```
 
-Checks: `cargo clippy` / `cd web && aube run check` / `aube run test`
+`make help` lists everything. `make test` and `make format` also write their output to `.tmp/test.log` and `.tmp/format.log`; `make check` runs clippy, `astro check`, and biome.
+
+`aube` is the only package manager — never `npm`, `pnpm`, or `yarn`.
 
 ## Deployment
 
-Expose `http://127.0.0.1:8787` via `cloudflared` and put Cloudflare Access in front of the public hostname. The server binds loopback only; never bind `0.0.0.0`.
+Create a remotely-managed tunnel in the Cloudflare Zero Trust dashboard, point its public hostname at `http://127.0.0.1:8787`, put Access in front of it, and put the tunnel token in `.env`. Then:
+
+```bash
+make deploy   # release build, then cloudflared serving the tunnel
+```
+
+Needs `cloudflared` on PATH. The server binds loopback only; never bind `0.0.0.0`.
