@@ -50,19 +50,26 @@ export async function sendPrompt(paneId: string, text: string): Promise<void> {
 	}
 }
 
-/** Plain text, straight from the pane; the caller renders it verbatim. */
+export type Output = { text: string; truncated: boolean };
+
+/** Plain text, straight from the pane; the caller renders it verbatim.
+ *  `truncated` says herdr held more than `lines` asked for. */
 export async function fetchOutput(
 	paneId: string,
+	lines: number,
 	signal?: AbortSignal,
-): Promise<string> {
+): Promise<Output> {
 	const response = await fetch(
-		`/api/panes/${encodeURIComponent(paneId)}/output`,
+		`/api/panes/${encodeURIComponent(paneId)}/output?lines=${lines}`,
 		{ signal },
 	);
 	if (!response.ok) {
 		throw new Error(await reason(response, "could not read the pane"));
 	}
-	return response.text();
+	return {
+		text: await response.text(),
+		truncated: response.headers.get("x-truncated") === "true",
+	};
 }
 
 /** Agent panes show what they are and what they are doing; shells just say so. */

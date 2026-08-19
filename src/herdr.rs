@@ -170,21 +170,26 @@ pub async fn session() -> Result<Session> {
     Ok(to_session(snapshot().await?))
 }
 
-#[derive(Deserialize)]
-struct Read {
-    text: String,
+/// `truncated` means herdr had more scrollback than `lines` asked for, which is
+/// what lets the phone offer to reach further back.
+#[derive(Deserialize, Serialize)]
+pub struct Output {
+    pub text: String,
+    pub truncated: bool,
 }
 
-/// The pane's recent output, ANSI already stripped by herdr. `lines` bounds
-/// what a phone has to download and paint; herdr flags the rest truncated.
-pub async fn read(pane_id: &str, lines: u32) -> Result<String> {
+/// The pane's recent output, ANSI already stripped by herdr. `lines` bounds what
+/// a phone has to download and paint. Note an agent pane running a full-screen
+/// TUI has no scrollback at all: it reports only the current screen, however
+/// large a window is asked for.
+pub async fn read(pane_id: &str, lines: u32) -> Result<Output> {
     let result = call(
         "pane.read",
         json!({ "pane_id": pane_id, "source": "recent", "lines": lines }),
     )
     .await?;
     let read = result.get("read").context("pane.read returned no read")?;
-    Ok(serde_json::from_value::<Read>(read.clone())?.text)
+    Ok(serde_json::from_value(read.clone())?)
 }
 
 /// Agent panes take a prompt; a plain shell needs the text plus a newline.

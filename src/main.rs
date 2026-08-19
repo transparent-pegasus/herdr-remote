@@ -2,7 +2,7 @@ mod herdr;
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -42,15 +42,33 @@ async fn prompt(Path(pane_id): Path<String>, Json(body): Json<Prompt>) -> ApiRes
 }
 
 /// Enough scrollback to make sense of what a pane is doing, little enough that
-/// a phone on mobile data can poll it.
+/// a phone on mobile data can poll it every few seconds.
 const OUTPUT_LINES: u32 = 300;
+/// A ceiling on what one request can pull back, so a deep buffer cannot be
+/// turned into an unbounded download.
+const MAX_OUTPUT_LINES: u32 = 20_000;
 
-/// Plain text, not JSON: the body is the pane's output and nothing else. A pane
-/// that has closed answers 500 here; the session list is what notices it went.
-async fn output(Path(pane_id): Path<String>) -> ApiResult<String> {
-    herdr::read(&pane_id, OUTPUT_LINES)
+#[derive(Deserialize)]
+struct Window {
+    lines: Option<u32>,
+}
+
+/// Plain text, not JSON: the body is the pane's output and nothing else, so it
+/// renders verbatim. Whether more scrollback exists rides in `x-truncated`,
+/// which is what the phone's "earlier output" control keys off. A pane that has
+/// closed answers 500 here; the session list is what notices it went.
+async fn output(
+    Path(pane_id): Path<String>,
+    Query(window): Query<Window>,
+) -> ApiResult<([(&'static str, String); 1], String)> {
+    let lines = window
+        .lines
+        .unwrap_or(OUTPUT_LINES)
+        .clamp(1, MAX_OUTPUT_LINES);
+    let output = herdr::read(&pane_id, lines)
         .await
-        .map_err(failed("could not read the pane"))
+        .map_err(failed("could not read the pane"))?;
+    Ok(([("x-truncated", output.truncated.to_string())], output.text))
 }
 
 // --- Host allowlist ---------------------------------------------------------

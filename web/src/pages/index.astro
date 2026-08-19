@@ -19,6 +19,7 @@
     <noscript>This page needs JavaScript to list panes and send prompts.</noscript>
     <p id="status" role="status"></p>
     <div id="list"></div>
+    <button id="more" type="button" hidden>Load earlier output</button>
     <pre id="log" hidden></pre>
 
     <form id="composer">
@@ -47,6 +48,7 @@
 
       const listEl = document.querySelector<HTMLDivElement>("#list")!;
       const logEl = document.querySelector<HTMLPreElement>("#log")!;
+      const moreEl = document.querySelector<HTMLButtonElement>("#more")!;
       const statusEl = document.querySelector<HTMLParagraphElement>("#status")!;
       const headingEl = document.querySelector<HTMLHeadingElement>("#heading")!;
       const backEl = document.querySelector<HTMLAnchorElement>("#back")!;
@@ -57,6 +59,9 @@
       const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
 
       const POLL_MS = 3000;
+      /** Matches the server default; each "earlier output" widens the window. */
+      const LINES = 300;
+      const MAX_LINES = 20000;
 
       let session: Session | null = null;
       let watching: string | null = null;
@@ -64,6 +69,7 @@
       let retry: ReturnType<typeof setTimeout> | undefined;
       let loads = 0;
       let watches = 0;
+      let lines = LINES;
 
       function say(message: string, failed = false) {
         statusEl.textContent = message;
@@ -111,15 +117,25 @@
       function watch(pane: Pane | null) {
         clearInterval(timer);
         watching = pane?.id ?? null;
+        // Each pane starts from the small window; widening is per visit.
+        lines = LINES;
+        moreEl.hidden = true;
         if (!pane) return;
 
         const mine = ++watches;
         const tick = async () => {
           if (document.hidden) return; // a backgrounded phone tab polls nothing
           try {
-            const text = await fetchOutput(pane.id, AbortSignal.timeout(15000));
+            const output = await fetchOutput(
+              pane.id,
+              lines,
+              AbortSignal.timeout(15000),
+            );
             if (mine !== watches) return; // a later pane already owns the view
-            paint(text);
+            paint(output.text);
+            // An agent pane in a full-screen TUI keeps no scrollback, so this
+            // stays hidden there however far back the window reaches.
+            moreEl.hidden = !output.truncated || lines >= MAX_LINES;
             // The interval keeps running through a failure, so the recovery is
             // what has to clear the warning it left behind.
             if (statusEl.classList.contains("error")) say("");
@@ -254,6 +270,14 @@
         }
       });
 
+      // Reading further back keeps the reader where they are: paint() only
+      // follows the tail when they were already at it.
+      moreEl.addEventListener("click", () => {
+        lines = Math.min(lines * 4, MAX_LINES);
+        moreEl.hidden = true;
+        say("Reading further back…");
+      });
+
       refreshEl.addEventListener("click", load);
       load();
     </script>
@@ -382,7 +406,18 @@
         font-size: 0.85rem;
         text-decoration: none;
       }
+      #more {
+        margin-bottom: 0.5rem;
+        padding: 0.5rem;
+        border: 1px solid var(--edge);
+        border-radius: 0.5rem;
+        background: none;
+        color: inherit;
+        font: inherit;
+        font-size: 0.85rem;
+      }
       /* Older WebViews do not mark the UA [hidden] rule !important. */
+      #more[hidden],
       #back[hidden],
       #list[hidden],
       #log[hidden] {
