@@ -6,9 +6,222 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>Herdr Remote</title>
   </head>
   <body>
-    <h1>Herdr Remote</h1>
+    <header>
+      <h1>Herdr Remote</h1>
+      <button id="refresh" type="button" aria-label="Reload panes">&#8635;</button>
+    </header>
+
+    <p id="status" role="status"></p>
+    <div id="tabs"></div>
+
+    <form id="composer" hidden>
+      <label for="text" id="target"></label>
+      <textarea id="text" rows="4" placeholder="Type an instruction…" required
+      ></textarea>
+      <button type="submit">Send</button>
+    </form>
+
+    <script>
+      import {
+        fetchSession,
+        paneSubtitle,
+        sendPrompt,
+        type Pane,
+      } from "../lib/api";
+
+      const tabsEl = document.querySelector<HTMLDivElement>("#tabs")!;
+      const statusEl = document.querySelector<HTMLParagraphElement>("#status")!;
+      const composerEl = document.querySelector<HTMLFormElement>("#composer")!;
+      const targetEl = document.querySelector<HTMLLabelElement>("#target")!;
+      const textEl = document.querySelector<HTMLTextAreaElement>("#text")!;
+      const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
+
+      let selected: Pane | null = null;
+
+      const say = (message: string) => {
+        statusEl.textContent = message;
+      };
+
+      function select(pane: Pane) {
+        selected = pane;
+        targetEl.textContent = pane.label;
+        composerEl.hidden = false;
+        for (const button of tabsEl.querySelectorAll("button")) {
+          button.setAttribute(
+            "aria-current",
+            button.dataset.paneId === pane.id ? "true" : "false",
+          );
+        }
+        textEl.focus();
+      }
+
+      // textContent throughout: pane labels are terminal titles, not our markup.
+      function render(tabs: Awaited<ReturnType<typeof fetchSession>>["tabs"]) {
+        tabsEl.replaceChildren();
+        for (const tab of tabs) {
+          const section = document.createElement("section");
+          const heading = document.createElement("h2");
+          heading.textContent = tab.label;
+          section.append(heading);
+
+          for (const pane of tab.panes) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.dataset.paneId = pane.id;
+            button.setAttribute(
+              "aria-current",
+              pane.id === selected?.id ? "true" : "false",
+            );
+
+            const name = document.createElement("span");
+            name.className = "name";
+            name.textContent = pane.label;
+            const subtitle = document.createElement("span");
+            subtitle.className = "subtitle";
+            subtitle.textContent = paneSubtitle(pane);
+
+            button.append(name, subtitle);
+            button.addEventListener("click", () => select(pane));
+            section.append(button);
+          }
+          tabsEl.append(section);
+        }
+      }
+
+      async function load() {
+        say("Loading…");
+        try {
+          const session = await fetchSession();
+          render(session.tabs);
+          say(session.tabs.length ? "" : "No panes.");
+        } catch (error) {
+          say(error instanceof Error ? error.message : "Could not load session.");
+        }
+      }
+
+      composerEl.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const pane = selected;
+        const text = textEl.value.trim();
+        if (!pane || !text) return;
+
+        const submit = composerEl.querySelector("button")!;
+        submit.disabled = true;
+        say("Sending…");
+        try {
+          await sendPrompt(pane.id, text);
+          textEl.value = "";
+          say(`Sent to ${pane.label}.`);
+        } catch (error) {
+          say(error instanceof Error ? error.message : "Could not send.");
+        } finally {
+          submit.disabled = false;
+        }
+      });
+
+      refreshEl.addEventListener("click", load);
+      load();
+    </script>
+
+    <style>
+      :root {
+        --edge: color-mix(in srgb, currentColor 15%, transparent);
+        --muted: color-mix(in srgb, currentColor 60%, transparent);
+        --accent: color-mix(in srgb, currentColor 8%, transparent);
+      }
+      body {
+        margin: 0 auto;
+        max-width: 34rem;
+        padding: 0 1rem 3rem;
+        font: 1rem/1.5 system-ui, sans-serif;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+      }
+      h1 {
+        font-size: 1.25rem;
+      }
+      h2 {
+        margin: 1.5rem 0 0.5rem;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+      #status:empty {
+        display: none;
+      }
+      #status {
+        color: var(--muted);
+      }
+      #tabs button {
+        display: block;
+        width: 100%;
+        margin-bottom: 0.5rem;
+        padding: 0.75rem;
+        border: 1px solid var(--edge);
+        border-radius: 0.5rem;
+        background: none;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+      }
+      #tabs button[aria-current="true"] {
+        background: var(--accent);
+        border-color: currentColor;
+      }
+      .name {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .subtitle {
+        display: block;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      #composer {
+        position: sticky;
+        bottom: 0;
+        display: grid;
+        gap: 0.5rem;
+        padding: 0.75rem 0;
+        border-top: 1px solid var(--edge);
+        background: Canvas;
+      }
+      #target {
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      textarea {
+        padding: 0.5rem;
+        border: 1px solid var(--edge);
+        border-radius: 0.5rem;
+        background: none;
+        color: inherit;
+        font: inherit;
+        resize: vertical;
+      }
+      #composer button,
+      #refresh {
+        padding: 0.75rem;
+        border: 1px solid var(--edge);
+        border-radius: 0.5rem;
+        background: none;
+        color: inherit;
+        font: inherit;
+      }
+      #refresh {
+        padding: 0.4rem 0.75rem;
+      }
+    </style>
   </body>
 </html>
