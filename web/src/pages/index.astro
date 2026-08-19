@@ -36,6 +36,7 @@
       import {
         fetchOutput,
         fetchSession,
+        isTransient,
         paneSubtitle,
         sendPrompt,
         type Pane,
@@ -60,12 +61,19 @@
       let session: Session | null = null;
       let watching: string | null = null;
       let timer: ReturnType<typeof setInterval> | undefined;
+      let retry: ReturnType<typeof setTimeout> | undefined;
       let loads = 0;
       let watches = 0;
 
       function say(message: string, failed = false) {
         statusEl.textContent = message;
         statusEl.classList.toggle("error", failed && message !== "");
+      }
+
+      /** A dropped tunnel is not a fault to report, it is something to retry. */
+      function complain(error: unknown, fallback: string) {
+        if (isTransient(error)) return say("Reconnecting…", true);
+        say(error instanceof Error ? error.message : fallback, true);
       }
 
       // textContent throughout: labels are terminal titles, not our markup.
@@ -112,11 +120,14 @@
             const text = await fetchOutput(pane.id, AbortSignal.timeout(15000));
             if (mine !== watches) return; // a later pane already owns the view
             paint(text);
+            // The interval keeps running through a failure, so the recovery is
+            // what has to clear the warning it left behind.
+            if (statusEl.classList.contains("error")) say("");
           } catch (error) {
             if (mine !== watches) return;
             // Keep polling a pane that is merely slow; a closed one shows up as
             // gone on the next session reload.
-            say(error instanceof Error ? error.message : "Could not read.", true);
+            complain(error, "Could not read.");
           }
         };
         logEl.textContent = "";
@@ -179,6 +190,7 @@
 
       async function load() {
         const mine = ++loads;
+        clearTimeout(retry);
         say("Loading…");
         try {
           const fresh = await fetchSession(AbortSignal.timeout(15000));
@@ -190,9 +202,18 @@
           render();
         } catch (error) {
           if (mine !== loads) return;
-          say(error instanceof Error ? error.message : "Could not load.", true);
+          complain(error, "Could not load.");
+          // Stay connected for as long as the page is in front. A backgrounded
+          // tab stops instead, and visibilitychange picks it back up.
+          if (!document.hidden) retry = setTimeout(load, POLL_MS);
         }
       }
+
+      // Coming back to the app resyncs at once rather than after a poll: the
+      // phone will have slept, and WARP reconnects on its own schedule.
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) load();
+      });
 
       // Same-origin links move the app, not the browser. Modified clicks keep
       // their usual meaning (new tab, download).

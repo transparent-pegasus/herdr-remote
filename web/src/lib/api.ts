@@ -69,3 +69,14 @@ export async function fetchOutput(
 export function paneSubtitle(pane: Pane): string {
 	return pane.agent ? `${pane.agent} · ${pane.state}` : "shell";
 }
+
+/** A timed-out or dropped request is expected here rather than exceptional: the
+ *  phone sleeps, WARP reconnects, the tunnel blips. Callers retry instead of
+ *  surfacing "signal timed out", which reads as a fault the user must act on. */
+export function isTransient(error: unknown): boolean {
+	return (
+		(error instanceof DOMException && error.name === "TimeoutError") ||
+		// fetch() rejects with a TypeError when the connection itself fails.
+		error instanceof TypeError
+	);
+}
