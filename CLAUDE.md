@@ -24,7 +24,7 @@ herdrpowers skills and commands resolve `<KEY>` placeholders from this section.
 - `DESIGN_DOC_PATH_PATTERN`: `docs/designs/YYYY-MM-DD-feature.md`
 - `PLAN_PATH_PATTERN`: `docs/plans/YYYY-MM-DD-feature.md`
 - `PLAN_DIRECTORY`: `docs/plans/`
-- `BASELINE_VERIFICATION_COMMAND`: `make check test`
+- `BASELINE_VERIFICATION_COMMAND`: `make check` (deps, format, lint, test — logs under `.tmp/`)
 - `SUPPLEMENTAL_VERIFICATION_COMMANDS`: `make run` as a smoke check when `src/` or `web/` changes (it rebuilds `web/dist`, which the server serves)
 - `TEST_FRAMEWORK_AND_COMMANDS`: Rust `#[test]` via `cargo test`; Vitest via `aube run test` in `web/`. `aube` is the only package manager — never `npm`/`pnpm`/`yarn`.
 - `TEST_FILE_LOCATIONS`: Rust unit tests in `#[cfg(test)]` modules beside the code in `src/`, integration tests in `tests/`. TypeScript tests colocated as `web/src/**/*.test.ts`.

@@ -23,7 +23,7 @@ cp .env.example .env   # once
 make run               # build the UI, serve on 127.0.0.1:8787
 ```
 
-`make help` lists everything. `make test` and `make format` also write their output to `.tmp/test.log` and `.tmp/format.log`; `make check` runs clippy, `astro check`, and biome.
+`make check` is the one to run before committing: it installs dependencies, then formats, tests, and lints, stopping at the first failure. Each stage tees its output to `.tmp/` (`format.log`, `lint.log`, `test.log`), and each is also runnable on its own. `make help` lists everything.
 
 `aube` is the only package manager — never `npm`, `pnpm`, or `yarn`.
 
@@ -32,7 +32,9 @@ make run               # build the UI, serve on 127.0.0.1:8787
 Create a remotely-managed tunnel in the Cloudflare Zero Trust dashboard, point its public hostname at `http://127.0.0.1:8787`, put Access in front of it, and put the tunnel token in `.env`. Then:
 
 ```bash
-make deploy   # release build, then cloudflared serving the tunnel
+make deploy   # release build, then wrangler serving the tunnel
 ```
 
-Needs `cloudflared` on PATH. The server binds loopback only; never bind `0.0.0.0`.
+Needs `wrangler` on PATH — it ships its own `cloudflared`, so that does not need installing separately. The server binds loopback only; never bind `0.0.0.0`.
+
+`wrangler tunnel quick-start http://127.0.0.1:8787` gives a throwaway public URL with no Cloudflare Access in front of it. Handy for a one-off check, never for leaving running: anyone with the URL can drive your panes.
