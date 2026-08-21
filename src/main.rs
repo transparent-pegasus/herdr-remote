@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, routing::any, routing::get, routing::post};
+use axum::{Json, Router, routing::get, routing::post};
 use serde::Deserialize;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -266,6 +266,22 @@ async fn harden(mut response: Response) -> Response {
     response
 }
 
+/// A path whose first non-empty segment is `api` belongs to the API even when
+/// the nested router does not claim it, as with `/api/` and `//api`.
+async fn keep_api_out_of_ui(request: Request, next: Next) -> Response {
+    if request
+        .uri()
+        .path()
+        .split('/')
+        .find(|segment| !segment.is_empty())
+        == Some("api")
+    {
+        no_store(StatusCode::NOT_FOUND.into_response()).await
+    } else {
+        next.run(request).await
+    }
+}
+
 fn app(allowed: Allowed) -> Router {
     // no-store on /api only: pane output and session state are live, but the
     // hashed UI assets should stay cacheable for a phone on mobile data.
@@ -278,22 +294,19 @@ fn app(allowed: Allowed) -> Router {
         .route("/panes/{pane_id}/up", post(up))
         .route("/panes/{pane_id}/down", post(down))
         .route("/panes/{pane_id}/output", get(output))
-        // Without this, an unknown /api path — including bare /api and /api/,
-        // which a {*rest} route would NOT match — falls through the nest to the
-        // UI and answers a fetch with 200 and a page of HTML.
+        // Unknown paths claimed by the nest stay API responses.
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::map_response(no_store));
 
+    // The UI routes on the path (/w/<workspace>/t/<tab>/p/<pane>), so a deep
+    // link or a reload asks for a file that does not exist; hand back the app.
+    let ui = Router::new()
+        .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
+        .layer(middleware::from_fn(keep_api_out_of_ui));
+
     Router::new()
         .nest("/api", api)
-        // nest registers `/api` and `/api/{*rest}`, and that wildcard needs at
-        // least one character — so bare `/api/` matches neither and would fall
-        // through to the UI fallback below. Name it explicitly.
-        .route("/api/", any(|| async { StatusCode::NOT_FOUND }))
-        // The UI routes on the path (/w/<workspace>/t/<tab>/p/<pane>), so a
-        // deep link or a reload asks for a file that does not exist; hand back
-        // the app.
-        .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
+        .fallback_service(ui)
         .layer(middleware::from_fn_with_state(
             allowed.clone(),
             guard_origin,

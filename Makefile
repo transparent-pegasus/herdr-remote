@@ -75,7 +75,7 @@ setup: ## terraform the cloudflare side, write .tunnel-token
 	@chmod 600 .tunnel-token.tmp && mv .tunnel-token.tmp .tunnel-token
 	@echo "wrote .tunnel-token — make deploy (foreground) or make services (persistent)"
 
-test: | $(TMP) ## cargo test + vitest, logged to .tmp/test.log
+test: web | $(TMP) ## cargo test + vitest, logged to .tmp/test.log
 	{ cargo test; cd web && aube run test; } 2>&1 | tee $(TMP)/test.log
 
 format: | $(TMP) ## cargo fmt + biome write, logged to .tmp/format.log
