@@ -89,33 +89,23 @@ Setup, once:
 2. `install -m 600 .env.example .env` and fill `CLOUDFLARE_API_TOKEN`,
    `CLOUDFLARE_ACCOUNT_ID`, `USER_EMAIL`, `TEAM_NAME`; set
    `BIND_ADDR=10.99.99.1`.
-3. Migrating from a hand-made setup? Before starting downtime, check Zero Trust
-   -> Access -> Applications for an existing WARP enrollment application. Open
-   it, copy its Application ID, and import it (replace `<application-id>`):
-
-   ```bash
-   set -a && . ./.env && set +a && \
-     TF_VAR_account_id="$CLOUDFLARE_ACCOUNT_ID" \
-     TF_VAR_user_email="$USER_EMAIL" \
-     TF_VAR_team_name="$TEAM_NAME" \
-     terraform -chdir=infra import \
-     cloudflare_zero_trust_access_application.enrollment \
-     "$CLOUDFLARE_ACCOUNT_ID/<application-id>"
-   ```
-
-4. A private-network CIDR belongs to exactly one tunnel, so delete the old
+3. A private-network CIDR belongs to exactly one tunnel, so delete the old
    tunnel's `10.99.99.1/32` route (or the whole tunnel) in the dashboard —
    remote control is down from here until the final step.
-5. `make setup` — Terraform shows its plan and asks to confirm, then writes the
+4. `make setup` (needs `terraform`, `cloudflared`, `curl`, `jq` on PATH) —
+   Terraform shows its plan and asks to confirm, then writes the
    tunnel's connector token to `.tunnel-token` (0600, git-ignored, also present
    in `infra/terraform.tfstate` — both stay local). Terraform now owns the
    Split Tunnels list (include mode: only the /32 and the team's own
    `.cloudflareaccess.com` domain ride WARP) and device enrollment. That device
    profile is **tenant-global**: any device enrolled later gets the same
-   include-mode list.
-6. Install Cloudflare One Agent on the phone (the app formerly published as
+   include-mode list. Account singletons Cloudflare creates for you — the
+   device profile, the Zero Trust organization settings, and the WARP
+   enrollment application — are imported, not created, so a hand-made setup
+   needs no manual import step.
+5. Install Cloudflare One Agent on the phone (the app formerly published as
    1.1.1.1 / WARP), log in with `TEAM_NAME`, and enrol as `USER_EMAIL`.
-7. `make deploy`, then browse to `http://10.99.99.1:8787`. The Access prompt
+6. `make deploy`, then browse to `http://10.99.99.1:8787`. The Access prompt
    for the private app authenticates the user, not just the device.
 
 The trade against a public hostname: the client must stay connected on the

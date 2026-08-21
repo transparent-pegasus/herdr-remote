@@ -50,6 +50,7 @@ firewall: | $(TMP) ## drop BIND_ADDR:PORT arriving off-loopback (needs sudo)
 setup: ## terraform the cloudflare side, write .tunnel-token
 	@command -v terraform >/dev/null || { echo "terraform not found — https://developer.hashicorp.com/terraform/install"; exit 1; }
 	@command -v cloudflared >/dev/null || { echo "cloudflared not found (needs >= 2025.4.0 for --token-file) — https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"; exit 1; }
+	@for tool in curl jq; do command -v "$$tool" >/dev/null || { echo "$$tool not found — needed to look up the account's existing WARP enrollment application"; exit 1; }; done
 	@{ set -a && . ./.env; } 2>/dev/null || true; test -n "$$CLOUDFLARE_API_TOKEN" -a -n "$$CLOUDFLARE_ACCOUNT_ID" -a -n "$$USER_EMAIL" -a -n "$$TEAM_NAME" \
 	  || { echo "Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, USER_EMAIL, TEAM_NAME in .env"; exit 1; }
 	@umask 077 \
@@ -60,11 +61,15 @@ setup: ## terraform the cloudflare side, write .tunnel-token
 	  && terraform -chdir=infra validate \
 	  && { terraform -chdir=infra state show cloudflare_zero_trust_device_default_profile.warp >/dev/null 2>&1 \
 	       || terraform -chdir=infra import cloudflare_zero_trust_device_default_profile.warp "$$CLOUDFLARE_ACCOUNT_ID"; } \
-	  && { terraform -chdir=infra apply \
-	       || { status=$$?; \
-	            echo "terraform apply failed; if a WARP enrollment application already exists, import it first:"; \
-	            echo 'terraform -chdir=infra import cloudflare_zero_trust_access_application.enrollment "$$CLOUDFLARE_ACCOUNT_ID/<application-id>"'; \
-	            exit $$status; }; } \
+	  && { terraform -chdir=infra state show cloudflare_zero_trust_organization.this >/dev/null 2>&1 \
+	       || terraform -chdir=infra import cloudflare_zero_trust_organization.this "$$CLOUDFLARE_ACCOUNT_ID"; } \
+	  && { terraform -chdir=infra state show cloudflare_zero_trust_access_application.enrollment >/dev/null 2>&1 \
+	       || { warp_app=$$(curl -fsS -H "Authorization: Bearer $$CLOUDFLARE_API_TOKEN" \
+	                          "https://api.cloudflare.com/client/v4/accounts/$$CLOUDFLARE_ACCOUNT_ID/access/apps" \
+	                        | jq -r 'first(.result[] | select(.type == "warp") | .id) // empty'); \
+	            test -z "$$warp_app" \
+	              || terraform -chdir=infra import cloudflare_zero_trust_access_application.enrollment "accounts/$$CLOUDFLARE_ACCOUNT_ID/$$warp_app"; }; } \
+	  && terraform -chdir=infra apply \
 	  && chmod 600 infra/terraform.tfstate \
 	  && for backup in infra/*.backup; do \
 	       test ! -e "$$backup" || chmod 600 "$$backup"; \

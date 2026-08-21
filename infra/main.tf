@@ -55,6 +55,9 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_route" "herdr" {
 # include-mode doc lists as required for Access login and WARP sessions.
 resource "cloudflare_zero_trust_device_default_profile" "warp" {
   account_id = var.account_id
+  # Pinned: left unset, apply nulls the account's existing value to "".
+  tunnel_protocol     = "masque"
+  dns_search_suffixes = []
   include = [
     {
       address     = "${var.bind_addr}/32"
@@ -65,6 +68,19 @@ resource "cloudflare_zero_trust_device_default_profile" "warp" {
       description = "Access login + session"
     },
   ]
+}
+
+# Account-level "Cloudflare One Client Authentication" (Access -> Settings):
+# the app's allow_authenticate_via_warp is rejected outright until a session
+# duration exists here. Another account SINGLETON — imported, never created —
+# so name/auth_domain are pinned to the values the tenant already has rather
+# than left null, which the PUT would write back as empty.
+resource "cloudflare_zero_trust_organization" "this" {
+  account_id                  = var.account_id
+  name                        = "${var.team_name}.cloudflareaccess.com"
+  auth_domain                 = "${var.team_name}.cloudflareaccess.com"
+  allow_authenticate_via_warp = true
+  warp_auth_session_duration  = "24h"
 }
 
 # One reusable policy: the same single identity gates enrollment and the app.
@@ -78,12 +94,14 @@ resource "cloudflare_zero_trust_access_policy" "user" {
 }
 
 # Device enrollment permission — the review's "restrict it first". No
-# session_duration: the provider rejects it on type = "warp". The tenant may
-# already have a warp app from the manual setup — imported on conflict, step 2.
+# session_duration: the provider rejects it on type = "warp". Cloudflare
+# auto-creates this app on every Zero Trust account, so it is always imported,
+# never created (make setup looks up its id); its name is fixed by Cloudflare
+# and pinned here, or every plan reports a rename that silently never lands.
 resource "cloudflare_zero_trust_access_application" "enrollment" {
   account_id = var.account_id
   type       = "warp"
-  name       = "herdr-remote device enrollment"
+  name       = "Warp Login App"
   policies = [{
     id         = cloudflare_zero_trust_access_policy.user.id
     precedence = 1
@@ -110,6 +128,8 @@ resource "cloudflare_zero_trust_access_application" "herdr" {
     id         = cloudflare_zero_trust_access_policy.user.id
     precedence = 1
   }]
+
+  depends_on = [cloudflare_zero_trust_organization.this]
 }
 
 output "tunnel_token" {
