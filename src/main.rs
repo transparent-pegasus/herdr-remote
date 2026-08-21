@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, routing::any, routing::get, routing::post};
+use axum::{Json, Router, routing::get, routing::post};
 use serde::Deserialize;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -242,6 +242,61 @@ fn parse_bind(bind: &str) -> anyhow::Result<std::net::Ipv4Addr> {
     Ok(addr)
 }
 
+async fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Applied outermost so even a guard's 403 carries the headers. frame-ancestors
+/// replaces X-Frame-Options; a page that cannot frame the UI cannot clickjack
+/// its buttons.
+async fn harden(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    response
+}
+
+fn app(allowed: Allowed) -> Router {
+    // no-store on /api only: pane output and session state are live, but the
+    // hashed UI assets should stay cacheable for a phone on mobile data.
+    let api = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/session", get(session))
+        .route("/panes/{pane_id}/prompt", post(prompt))
+        .route("/panes/{pane_id}/interrupt", post(interrupt))
+        .route("/panes/{pane_id}/enter", post(enter))
+        .route("/panes/{pane_id}/up", post(up))
+        .route("/panes/{pane_id}/down", post(down))
+        .route("/panes/{pane_id}/output", get(output))
+        // Without this, an unknown /api path — including bare /api and /api/,
+        // which a {*rest} route would NOT match — falls through the nest to the
+        // UI and answers a fetch with 200 and a page of HTML.
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(middleware::map_response(no_store));
+
+    Router::new()
+        .nest("/api", api)
+        // The UI routes on the path (/t/<tab>/p/<pane>), so a deep link or a
+        // reload asks for a file that does not exist; hand back the app.
+        .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
+        .layer(middleware::from_fn_with_state(
+            allowed.clone(),
+            guard_origin,
+        ))
+        .layer(middleware::from_fn_with_state(allowed, guard_host))
+        .layer(middleware::map_response(harden))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let port = env_nonempty("PORT").unwrap_or_else(|| "8787".into());
@@ -254,26 +309,7 @@ async fn main() -> anyhow::Result<()> {
     let allowed = Allowed(Arc::new(allowed_hosts(&bind, &port, extra.as_deref())));
     println!("accepting Host: {:?}", allowed.0);
 
-    let app = Router::new()
-        .route("/api/health", get(|| async { "ok" }))
-        .route("/api/session", get(session))
-        .route("/api/panes/{pane_id}/prompt", post(prompt))
-        .route("/api/panes/{pane_id}/interrupt", post(interrupt))
-        .route("/api/panes/{pane_id}/enter", post(enter))
-        .route("/api/panes/{pane_id}/up", post(up))
-        .route("/api/panes/{pane_id}/down", post(down))
-        .route("/api/panes/{pane_id}/output", get(output))
-        // Without this, an unknown /api path would fall through to the UI and
-        // answer a fetch with 200 and a page of HTML.
-        .route("/api/{*rest}", any(|| async { StatusCode::NOT_FOUND }))
-        // The UI routes on the path (/t/<tab>/p/<pane>), so a deep link or a
-        // reload asks for a file that does not exist; hand back the app.
-        .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
-        .layer(middleware::from_fn_with_state(
-            allowed.clone(),
-            guard_origin,
-        ))
-        .layer(middleware::from_fn_with_state(allowed, guard_host));
+    let app = app(allowed);
 
     // The tunnel is the sole intended ingress; the bind address decides who else
     // can even open a socket.
