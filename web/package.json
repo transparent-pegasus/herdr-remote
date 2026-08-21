@@ -3,7 +3,6 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"dev": "astro dev",
 		"build": "astro build",
 		"test": "vitest run",
 		"check": "astro check && biome check ."

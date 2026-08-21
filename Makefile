@@ -68,8 +68,8 @@ deps: ## install rust + web dependencies
 web: deps ## build the UI into web/dist
 	cd web && aube run build
 
-run: web $(NETWORK_DEPS) ## serve on BIND_ADDR:PORT from .env, default 127.0.0.1:8787
-	cargo run
+run: web $(NETWORK_DEPS) ## serve on BIND_ADDR:PORT from .env, default 127.0.0.1:8787 (RELEASE=1 for a release build)
+	cargo run $(if $(RELEASE),--release --quiet)
 
 # A private-network route needs an address WARP can be routed to, and an alias on
 # `lo` does not survive a reboot — so re-add it here rather than relying on the

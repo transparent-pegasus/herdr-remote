@@ -25,7 +25,7 @@ fn socket_path() -> String {
 }
 
 /// Send one request, return its `result`.
-pub async fn call(method: &str, params: Value) -> Result<Value> {
+async fn call(method: &str, params: Value) -> Result<Value> {
     // A herdr that accepts the connection and then never answers must not pin
     // an axum task and a socket descriptor forever.
     timeout(TIMEOUT, exchange(&socket_path(), method, params))

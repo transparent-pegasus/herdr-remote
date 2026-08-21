@@ -65,6 +65,7 @@ than trusting the UI's disabled buttons.
 ```bash
 install -m 600 .env.example .env   # once
 make run               # build the UI, serve on 127.0.0.1:8787
+make run RELEASE=1     # same, but a release build
 ```
 
 `make check` is the one to run before committing: it installs dependencies, then tests, lints, and formats, stopping at the first failure. Each stage tees its output to `.tmp/` (`test.log`, `lint.log`, `format.log`), and each is also runnable on its own. Because formatting runs last, freshly written code trips the lint stage — run `make format` first, or reorder the target if you would rather it self-heal. `make help` lists everything.
