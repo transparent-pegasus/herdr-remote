@@ -1,5 +1,34 @@
 import { expect, test, vi } from "vitest";
-import { isTransient, type Pane, paneSubtitle, pressArrow } from "./api";
+import {
+	fetchSession,
+	isTransient,
+	type Pane,
+	paneSubtitle,
+	pressArrow,
+} from "./api";
+
+const session = {
+	workspaces: [
+		{
+			id: "w2",
+			label: "aituber-v1",
+			tabs: [
+				{
+					id: "w2:t1",
+					label: "backend",
+					panes: [
+						{
+							id: "w2:p1",
+							label: "orchestrator",
+							agent: "claude",
+							state: "idle",
+						},
+					],
+				},
+			],
+		},
+	],
+};
 
 const pane = (over: Partial<Pane> = {}): Pane => ({
 	id: "w1:p1",
@@ -7,6 +36,28 @@ const pane = (over: Partial<Pane> = {}): Pane => ({
 	agent: null,
 	state: "unknown",
 	...over,
+});
+
+test("session responses carry workspaces", async () => {
+	vi.stubGlobal("fetch", async () => Response.json(session));
+	try {
+		await expect(fetchSession()).resolves.toEqual(session);
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
+
+test("session responses reject the old top-level tabs", async () => {
+	vi.stubGlobal("fetch", async () =>
+		Response.json({ tabs: session.workspaces[0].tabs }),
+	);
+	try {
+		await expect(fetchSession()).rejects.toThrow(
+			"unexpected response from /api/session",
+		);
+	} finally {
+		vi.unstubAllGlobals();
+	}
 });
 
 test("agent panes show agent and state", () => {
