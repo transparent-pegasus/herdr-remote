@@ -436,7 +436,11 @@ mod tests {
 
         // A cross-site bodyless POST is refused before it reaches herdr.
         let response = app(allowed.clone())
-            .oneshot(request("POST", "/api/panes/x/enter", Some("https://evil.example.com")))
+            .oneshot(request(
+                "POST",
+                "/api/panes/x/enter",
+                Some("https://evil.example.com"),
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -447,20 +451,29 @@ mod tests {
         // A same-origin POST passes the gate: it reaches the handler, which
         // fails on the absent herdr socket — anything but 403 proves passage.
         let response = app(allowed.clone())
-            .oneshot(request("POST", "/api/panes/x/enter", Some("http://127.0.0.1:8787")))
+            .oneshot(request(
+                "POST",
+                "/api/panes/x/enter",
+                Some("http://127.0.0.1:8787"),
+            ))
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::FORBIDDEN);
 
         // An unknown or bare /api path is an API 404, never the UI's HTML.
         for path in ["/api/nope", "/api", "/api/"] {
-            let response = app(allowed.clone()).oneshot(request("GET", path, None)).await.unwrap();
+            let response = app(allowed.clone())
+                .oneshot(request("GET", path, None))
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }
 
         // A rejected Host is refused whatever the path.
         let mut bad_host = request("GET", "/api/health", None);
-        bad_host.headers_mut().insert(header::HOST, "evil.example.com".parse().unwrap());
+        bad_host
+            .headers_mut()
+            .insert(header::HOST, "evil.example.com".parse().unwrap());
         let response = app(allowed).oneshot(bad_host).await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
