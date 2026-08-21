@@ -12,6 +12,11 @@ TMP := .tmp
 ifeq ($(strip $(PORT)),)
 override PORT := 8787
 endif
+# nftables ships in sbin, which is not on a non-root PATH, and every nft
+# operation here needs root anyway — so resolve it by path rather than asking
+# `command -v` whether the user can see it.
+NFT = $(shell command -v nft 2>/dev/null || for p in /usr/sbin/nft /sbin/nft; do test -x $$p && echo $$p && break; done)
+
 BIN = $(shell cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/herdr-remote
 
 .PHONY: help run deps web bind-addr firewall setup services test format lint check deploy
@@ -40,12 +45,13 @@ bind-addr: ## add BIND_ADDR to lo if missing (needs sudo)
 
 firewall: | $(TMP) ## drop BIND_ADDR:PORT arriving off-loopback (needs sudo)
 	@test -z "$$BIND_ADDR" \
-	  || { nft list table inet herdr-remote 2>/dev/null || sudo -n nft list table inet herdr-remote 2>/dev/null || true; } \
+	  || { test -n "$(NFT)" || { echo "nft not found — install nftables"; exit 1; }; }
+	@test -z "$$BIND_ADDR" \
+	  || { sudo -n $(NFT) list table inet herdr-remote 2>/dev/null || true; } \
 	     | grep -qF "ip daddr $$BIND_ADDR tcp dport $$PORT" \
 	  || { echo "installing nft drop rule (sudo)"; \
-	       command -v nft >/dev/null || { echo "nft not found — install nftables"; exit 1; }; \
 	       sed -e "s/@BIND_ADDR@/$$BIND_ADDR/" -e "s/@PORT@/$$PORT/" deploy/herdr.nft > $(TMP)/herdr.nft; \
-	       sudo nft -f $(TMP)/herdr.nft; }
+	       sudo $(NFT) -f $(TMP)/herdr.nft; }
 
 setup: ## terraform the cloudflare side, write .tunnel-token
 	@command -v terraform >/dev/null || { echo "terraform not found — https://developer.hashicorp.com/terraform/install"; exit 1; }
@@ -104,7 +110,8 @@ deploy: web bind-addr firewall ## build release, serve through the tunnel (foreg
 services: web | $(TMP) ## persistent alternative: systemd user units + boot net setup (private route only)
 	@test -s .tunnel-token || { echo ".tunnel-token missing or empty — make setup first"; exit 1; }
 	@test -n "$$BIND_ADDR" || { echo "services mode is private-route only — set BIND_ADDR"; exit 1; }
-	@for tool in cloudflared ip nft; do command -v "$$tool" >/dev/null || { echo "$$tool not found on PATH — needed to render the units"; exit 1; }; done
+	@for tool in cloudflared ip; do command -v "$$tool" >/dev/null || { echo "$$tool not found on PATH — needed to render the units"; exit 1; }; done
+	@test -n "$(NFT)" || { echo "nft not found — install nftables"; exit 1; }
 	cargo build --release
 	mkdir -p ~/.config/systemd/user
 	@sed -e "s|@BIN@|$(BIN)|" -e "s|@REPO@|$(CURDIR)|" -e "s/@BIND_ADDR@/$$BIND_ADDR/" -e "s/@PORT@/$$PORT/" \
@@ -112,7 +119,7 @@ services: web | $(TMP) ## persistent alternative: systemd user units + boot net 
 	@sed -e "s|@CLOUDFLARED@|$$(command -v cloudflared)|" -e "s|@REPO@|$(CURDIR)|" \
 	  deploy/cloudflared.service > ~/.config/systemd/user/cloudflared.service
 	@sed -e "s/@BIND_ADDR@/$$BIND_ADDR/" -e "s/@PORT@/$$PORT/" deploy/herdr.nft > $(TMP)/herdr.nft
-	@sed -e "s|@IP@|$$(command -v ip)|" -e "s|@NFT@|$$(command -v nft)|" -e "s/@BIND_ADDR@/$$BIND_ADDR/" \
+	@sed -e "s|@IP@|$$(command -v ip)|" -e "s|@NFT@|$(NFT)|" -e "s/@BIND_ADDR@/$$BIND_ADDR/" \
 	  deploy/herdr-remote-net.service > $(TMP)/herdr-remote-net.service
 	sudo install -m 644 $(TMP)/herdr.nft /etc/herdr-remote.nft
 	sudo install -m 644 $(TMP)/herdr-remote-net.service /etc/systemd/system/herdr-remote-net.service
