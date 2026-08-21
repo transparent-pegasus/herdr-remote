@@ -449,6 +449,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["cache-control"], "no-store");
 
         // The refusal itself still carries the hardening headers.
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
@@ -481,5 +482,6 @@ mod tests {
             .insert(header::HOST, "evil.example.com".parse().unwrap());
         let response = app(allowed).oneshot(bad_host).await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["cache-control"], "no-store");
     }
 }
