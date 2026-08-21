@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, routing::get, routing::post};
+use axum::{Json, Router, routing::any, routing::get, routing::post};
 use serde::Deserialize;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -286,6 +286,10 @@ fn app(allowed: Allowed) -> Router {
 
     Router::new()
         .nest("/api", api)
+        // nest registers `/api` and `/api/{*rest}`, and that wildcard needs at
+        // least one character — so bare `/api/` matches neither and would fall
+        // through to the UI fallback below. Name it explicitly.
+        .route("/api/", any(|| async { StatusCode::NOT_FOUND }))
         // The UI routes on the path (/w/<workspace>/t/<tab>/p/<pane>), so a
         // deep link or a reload asks for a file that does not exist; hand back
         // the app.
