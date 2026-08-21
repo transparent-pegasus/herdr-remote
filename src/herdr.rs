@@ -76,13 +76,21 @@ async fn exchange(path: &str, method: &str, params: Value) -> Result<Value> {
 
 #[derive(Deserialize)]
 struct Snapshot {
+    workspaces: Vec<WorkspaceInfo>,
     tabs: Vec<TabInfo>,
     panes: Vec<PaneInfo>,
 }
 
 #[derive(Deserialize)]
+struct WorkspaceInfo {
+    workspace_id: String,
+    label: String,
+}
+
+#[derive(Deserialize)]
 struct TabInfo {
     tab_id: String,
+    workspace_id: String,
     label: String,
 }
 
@@ -101,6 +109,13 @@ struct PaneInfo {
 
 #[derive(Serialize, Debug, PartialEq)]
 pub struct Session {
+    pub workspaces: Vec<Workspace>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Workspace {
+    pub id: String,
+    pub label: String,
     pub tabs: Vec<Tab>,
 }
 
@@ -134,27 +149,39 @@ impl PaneInfo {
 }
 
 fn to_session(snapshot: Snapshot) -> Session {
-    let tabs = snapshot
-        .tabs
+    let workspaces = snapshot
+        .workspaces
         .iter()
-        .map(|tab| Tab {
-            id: tab.tab_id.clone(),
-            label: tab.label.clone(),
-            panes: snapshot
-                .panes
+        .map(|workspace| Workspace {
+            id: workspace.workspace_id.clone(),
+            label: workspace.label.clone(),
+            tabs: snapshot
+                .tabs
                 .iter()
-                .filter(|pane| pane.tab_id == tab.tab_id)
-                .map(|pane| Pane {
-                    id: pane.pane_id.clone(),
-                    label: pane.label(),
-                    agent: pane.agent.clone(),
-                    state: pane.agent_status.clone(),
+                .filter(|tab| tab.workspace_id == workspace.workspace_id)
+                .map(|tab| Tab {
+                    id: tab.tab_id.clone(),
+                    label: tab.label.clone(),
+                    panes: snapshot
+                        .panes
+                        .iter()
+                        .filter(|pane| pane.tab_id == tab.tab_id)
+                        .map(|pane| Pane {
+                            id: pane.pane_id.clone(),
+                            label: pane.label(),
+                            agent: pane.agent.clone(),
+                            state: pane.agent_status.clone(),
+                        })
+                        .collect(),
                 })
+                .filter(|tab| !tab.panes.is_empty())
                 .collect(),
         })
-        .filter(|tab| !tab.panes.is_empty())
+        // A workspace with nothing to open is a dead row on a phone screen, the
+        // same reason an empty tab is dropped one level down.
+        .filter(|workspace| !workspace.tabs.is_empty())
         .collect();
-    Session { tabs }
+    Session { workspaces }
 }
 
 async fn snapshot() -> Result<Snapshot> {
