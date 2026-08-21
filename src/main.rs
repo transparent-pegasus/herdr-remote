@@ -479,13 +479,36 @@ mod tests {
             .unwrap();
         assert_ne!(response.status(), StatusCode::FORBIDDEN);
 
+        // Compare against the served shell so a static fallback cannot masquerade as an API 404.
+        let response = app(allowed.clone())
+            .oneshot(request("GET", "/", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ui_html = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
         // An unknown or bare /api path is an API 404, never the UI's HTML.
-        for path in ["/api/nope", "/api", "/api/"] {
+        for path in ["/api/nope", "/api", "/api/", "//api", "//api/health"] {
             let response = app(allowed.clone())
                 .oneshot(request("GET", path, None))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            let (parts, body) = response.into_parts();
+            assert_eq!(parts.status, StatusCode::NOT_FOUND, "{path}");
+            let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+            assert!(body != ui_html, "{path} returned the UI HTML");
+            if path == "/api/" {
+                assert_eq!(
+                    parts
+                        .headers
+                        .get(header::CACHE_CONTROL)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("no-store"),
+                    "{path}"
+                );
+            }
         }
 
         // A rejected Host is refused whatever the path.
