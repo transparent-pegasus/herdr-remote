@@ -1,3 +1,10 @@
+# OWNERSHIP: the state for these objects currently lives in ../portable-dev,
+# which is the `self` side (see TUNNEL_OWNER in the Makefile). This file is kept
+# so this repository can take ownership back, but `make setup` is refused while
+# TUNNEL_OWNER=external — and taking it back means moving infra/terraform.tfstate
+# here as well. Applying without that state creates a SECOND tunnel with a new
+# token, and the route apply then fails against the surviving /32.
+
 terraform {
   required_providers {
     cloudflare = {

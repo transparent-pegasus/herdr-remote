@@ -1,10 +1,47 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eo pipefail -c
 
+# A manager that starts this server injects BIND_ADDR/PORT in the environment.
+# `-include .env` would beat that, so capture the injected values first and put
+# them back afterwards: environment wins, .env is the fallback.
+INJECTED_BIND_ADDR := $(BIND_ADDR)
+INJECTED_PORT := $(PORT)
+
 -include .env
+
+ifneq ($(strip $(INJECTED_BIND_ADDR)),)
+override BIND_ADDR := $(INJECTED_BIND_ADDR)
+endif
+ifneq ($(strip $(INJECTED_PORT)),)
+override PORT := $(INJECTED_PORT)
+endif
+
 # Only what the server reads. A bare `export` would hand every recipe —
 # cargo, aube, build scripts — whatever secrets .env holds.
 export BIND_ADDR PORT ALLOWED_HOSTS
+
+# Who owns the Cloudflare Tunnel, the `lo` alias and the nftables rule.
+#   self      this repo does, and `make setup` / `deploy` / `services` work.
+#             Standalone, and the default.
+#   external  another repo does. This one is only a server: it takes BIND_ADDR
+#             and PORT from the environment and touches no network state.
+# Cloudflare gives an account one device profile, one Zero Trust organization
+# and one WARP enrollment app. Two repos applying against them flip-flop — each
+# apply reverts the other — so exactly one side may be `self`.
+TUNNEL_OWNER ?= self
+
+ifeq ($(TUNNEL_OWNER),external)
+NETWORK_DEPS :=
+else
+NETWORK_DEPS := bind-addr firewall
+endif
+
+# First prerequisite of every owner-only target, so a refusal costs no build.
+self-only:
+	@test "$(TUNNEL_OWNER)" = self || { \
+	  echo "TUNNEL_OWNER=$(TUNNEL_OWNER): the tunnel, the lo alias and the nft rule belong to another repository."; \
+	  echo "Run this target there, or set TUNNEL_OWNER=self in .env to take ownership back."; \
+	  exit 1; }
 
 TMP := .tmp
 # A blank PORT= in .env DEFINES the variable, so ?= would not rescue it, and an
@@ -19,7 +56,7 @@ NFT = $(shell command -v nft 2>/dev/null || for p in /usr/sbin/nft /sbin/nft; do
 
 BIN = $(shell cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/herdr-remote
 
-.PHONY: help run deps web bind-addr firewall setup services test format lint check deploy
+.PHONY: help self-only run deps web bind-addr firewall setup services test format lint check deploy
 
 help: ## list targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/'
@@ -31,19 +68,19 @@ deps: ## install rust + web dependencies
 web: deps ## build the UI into web/dist
 	cd web && aube run build
 
-run: web bind-addr firewall ## serve on BIND_ADDR:PORT from .env, default 127.0.0.1:8787
+run: web $(NETWORK_DEPS) ## serve on BIND_ADDR:PORT from .env, default 127.0.0.1:8787
 	cargo run
 
 # A private-network route needs an address WARP can be routed to, and an alias on
 # `lo` does not survive a reboot — so re-add it here rather than relying on the
 # operator having persisted it. Skipped entirely when BIND_ADDR is unset.
-bind-addr: ## add BIND_ADDR to lo if missing (needs sudo)
+bind-addr: self-only ## add BIND_ADDR to lo if missing (needs sudo)
 	@case "$$BIND_ADDR" in 0.0.0.0|::|::0|0:0:0:0:0:0:0:0) echo "BIND_ADDR=$$BIND_ADDR would listen on every interface — refusing"; exit 1;; esac
 	@test -z "$$BIND_ADDR" \
 	  || ip -4 -o addr show dev lo | grep -qFw "$$BIND_ADDR" \
 	  || { echo "adding $$BIND_ADDR/32 to lo (sudo)"; sudo ip addr add "$$BIND_ADDR/32" dev lo; }
 
-firewall: | $(TMP) ## drop BIND_ADDR:PORT arriving off-loopback (needs sudo)
+firewall: self-only | $(TMP) ## drop BIND_ADDR:PORT arriving off-loopback (needs sudo)
 	@test -z "$$BIND_ADDR" \
 	  || { test -n "$(NFT)" || { echo "nft not found — install nftables"; exit 1; }; }
 	@test -z "$$BIND_ADDR" \
@@ -53,7 +90,7 @@ firewall: | $(TMP) ## drop BIND_ADDR:PORT arriving off-loopback (needs sudo)
 	       sed -e "s/@BIND_ADDR@/$$BIND_ADDR/" -e "s/@PORT@/$$PORT/" deploy/herdr.nft > $(TMP)/herdr.nft; \
 	       sudo $(NFT) -f $(TMP)/herdr.nft; }
 
-setup: ## terraform the cloudflare side, write .tunnel-token
+setup: self-only ## terraform the cloudflare side, write .tunnel-token
 	@command -v terraform >/dev/null || { echo "terraform not found — https://developer.hashicorp.com/terraform/install"; exit 1; }
 	@command -v cloudflared >/dev/null || { echo "cloudflared not found (needs >= 2025.4.0 for --token-file) — https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"; exit 1; }
 	@for tool in curl jq; do command -v "$$tool" >/dev/null || { echo "$$tool not found — needed to look up the account's existing WARP enrollment application"; exit 1; }; done
@@ -100,7 +137,7 @@ check: deps ## everything: deps, test, lint, format — logged to .tmp/*.log
 	$(MAKE) lint
 	$(MAKE) format
 
-deploy: web bind-addr firewall ## build release, serve through the tunnel (foreground)
+deploy: self-only web $(NETWORK_DEPS) ## build release, serve through the tunnel (foreground)
 	@test -s .tunnel-token || { echo ".tunnel-token missing or empty — make setup first"; exit 1; }
 	@command -v cloudflared >/dev/null || { echo "cloudflared not found (needs >= 2025.4.0 for --token-file)"; exit 1; }
 	@test -n "$$ALLOWED_HOSTS" -o -n "$$BIND_ADDR" || { echo "Set ALLOWED_HOSTS to your public hostname, or BIND_ADDR for a private-network route — otherwise every tunnel request gets 403"; exit 1; }
@@ -108,7 +145,7 @@ deploy: web bind-addr firewall ## build release, serve through the tunnel (foreg
 	@test -z "$$BIND_ADDR" || echo "open http://$$BIND_ADDR:$$PORT on the enrolled device"
 	@$(BIN) & cloudflared tunnel run --token-file .tunnel-token & trap 'kill $$(jobs -p) 2>/dev/null' EXIT; wait -n
 
-services: web | $(TMP) ## persistent alternative: systemd user units + boot net setup (private route only)
+services: self-only web | $(TMP) ## persistent alternative: systemd user units + boot net setup (private route only)
 	@test -s .tunnel-token || { echo ".tunnel-token missing or empty — make setup first"; exit 1; }
 	@test -n "$$BIND_ADDR" || { echo "services mode is private-route only — set BIND_ADDR"; exit 1; }
 	@for tool in cloudflared ip; do command -v "$$tool" >/dev/null || { echo "$$tool not found on PATH — needed to render the units"; exit 1; }; done

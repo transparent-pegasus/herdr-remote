@@ -9,6 +9,23 @@ phone (Cloudflare One client) ── WARP ──> Cloudflare Access (private app
 
 Single Rust binary (Axum) serving the API and the static Astro UI from `web/dist`.
 
+## Tunnel ownership
+
+`TUNNEL_OWNER` in `.env` decides who owns the Cloudflare Tunnel, the `lo` alias and the
+nftables rule.
+
+- `self` — the default. This repository does it all: `make setup`, `make deploy`,
+  `make services` work as documented below.
+- `external` — another repository does. This one is only a server: it takes `BIND_ADDR`
+  and `PORT` from the environment, and `bind-addr` / `firewall` / `setup` / `deploy` /
+  `services` refuse. Injected `BIND_ADDR` and `PORT` beat the values in `.env`.
+
+Cloudflare gives an account exactly one device profile, one Zero Trust organization and
+one WARP enrollment application, so exactly one side may be `self`; two applying against
+the same objects flip-flop, each reverting the other. Switching sides is not a flag flip —
+`infra/terraform.tfstate` and `.tunnel-token` must move with the ownership.
+
+
 ## API
 
 ```
