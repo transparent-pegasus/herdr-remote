@@ -366,4 +366,102 @@ mod tests {
         assert!(!host_allowed("herdr.example.com.evil.net", &allowed));
         assert!(host_allowed("127.0.0.1:8787", &allowed));
     }
+
+    #[test]
+    fn wildcard_and_non_literal_binds_are_fatal() {
+        assert!(parse_bind("0.0.0.0").is_err());
+        assert!(parse_bind("::").is_err());
+        assert!(parse_bind("0:0:0:0:0:0:0:0").is_err());
+        // IPv4 only: everything downstream — the host:port string, the lo
+        // alias, the nft rule — is IPv4-shaped, so accepting ::1 here would
+        // just move the failure somewhere less legible.
+        assert!(parse_bind("::1").is_err());
+        assert!(parse_bind("example.com").is_err());
+        assert!(parse_bind("").is_err());
+        assert!(parse_bind("10.99.99.1").is_ok());
+        assert!(parse_bind("127.0.0.1").is_ok());
+    }
+
+    #[test]
+    fn empty_env_is_unset() {
+        // The Makefile exports BIND_ADDR/PORT/ALLOWED_HOSTS even when .env
+        // leaves them blank; blank must behave exactly like absent.
+        unsafe { std::env::set_var("HERDR_REMOTE_TEST_EMPTY", " ") };
+        assert_eq!(env_nonempty("HERDR_REMOTE_TEST_EMPTY"), None);
+        unsafe { std::env::set_var("HERDR_REMOTE_TEST_EMPTY", "x") };
+        assert_eq!(env_nonempty("HERDR_REMOTE_TEST_EMPTY"), Some("x".into()));
+    }
+
+    #[test]
+    fn origins_match_the_host_allowlist() {
+        let allowed = allowed_hosts("10.99.99.1", "8787", Some("herdr.example.com"));
+        assert!(origin_allowed("http://10.99.99.1:8787", &allowed));
+        assert!(origin_allowed("http://127.0.0.1:8787", &allowed));
+        assert!(origin_allowed("https://herdr.example.com", &allowed));
+        assert!(!origin_allowed("https://evil.example.com", &allowed));
+        // A sandboxed iframe or data: page sends the literal string "null".
+        assert!(!origin_allowed("null", &allowed));
+        assert!(!origin_allowed("", &allowed));
+        // Scheme is required — a bare host is not an Origin.
+        assert!(!origin_allowed("10.99.99.1:8787", &allowed));
+    }
+
+    #[tokio::test]
+    async fn responses_are_hardened() {
+        use tower::ServiceExt;
+        let allowed = Allowed(Arc::new(allowed_hosts("127.0.0.1", "8787", None)));
+        let request = |method: &str, path: &str, origin: Option<&str>| {
+            let mut builder = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::HOST, "127.0.0.1:8787");
+            if let Some(origin) = origin {
+                builder = builder.header(header::ORIGIN, origin);
+            }
+            builder.body(axum::body::Body::empty()).unwrap()
+        };
+
+        // API responses must never be cached, and every response names its type.
+        let response = app(allowed.clone())
+            .oneshot(request("GET", "/api/health", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "frame-ancestors 'none'"
+        );
+
+        // A cross-site bodyless POST is refused before it reaches herdr.
+        let response = app(allowed.clone())
+            .oneshot(request("POST", "/api/panes/x/enter", Some("https://evil.example.com")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // The refusal itself still carries the hardening headers.
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+
+        // A same-origin POST passes the gate: it reaches the handler, which
+        // fails on the absent herdr socket — anything but 403 proves passage.
+        let response = app(allowed.clone())
+            .oneshot(request("POST", "/api/panes/x/enter", Some("http://127.0.0.1:8787")))
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+
+        // An unknown or bare /api path is an API 404, never the UI's HTML.
+        for path in ["/api/nope", "/api", "/api/"] {
+            let response = app(allowed.clone()).oneshot(request("GET", path, None)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+
+        // A rejected Host is refused whatever the path.
+        let mut bad_host = request("GET", "/api/health", None);
+        bad_host.headers_mut().insert(header::HOST, "evil.example.com".parse().unwrap());
+        let response = app(allowed).oneshot(bad_host).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
 }
