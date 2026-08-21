@@ -5,6 +5,7 @@ node_modules/
 web/dist/
 web/.astro/
 .env
+.wrangler/
 .tmp/
 .worktrees/
 .tunnel-token*
