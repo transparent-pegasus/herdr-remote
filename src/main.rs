@@ -183,6 +183,40 @@ async fn guard_host(State(allowed): State<Allowed>, request: Request, next: Next
     }
 }
 
+// --- Origin gate --------------------------------------------------------------
+//
+// The bodyless POSTs (interrupt, enter) are CORS "simple" requests: a malicious
+// page anywhere can fire them without a preflight, and the browser sets Host to
+// the target's own name, so the Host allowlist passes. The Origin header is the
+// one thing such a page cannot forge; require it to match the same allowlist.
+
+/// Origin is scheme://host[:port]. The scheme carries no identity here (the
+/// tunnel terminates TLS), so match on host[:port] against the Host allowlist.
+fn origin_allowed(origin: &str, allowed: &[String]) -> bool {
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|host| host_allowed(host, allowed))
+}
+
+/// No Origin header (curl, native clients) passes: the gate is against
+/// browser-ambient authority, not against someone who can already reach the
+/// socket. An unreadable or unlisted Origin on a POST is refused.
+async fn guard_origin(State(allowed): State<Allowed>, request: Request, next: Next) -> Response {
+    let cross_site = request.method() == axum::http::Method::POST
+        && match request.headers().get(header::ORIGIN) {
+            None => false,
+            Some(value) => !value
+                .to_str()
+                .is_ok_and(|origin| origin_allowed(origin, &allowed.0)),
+        };
+    if cross_site {
+        (StatusCode::FORBIDDEN, "cross-site request refused").into_response()
+    } else {
+        next.run(request).await
+    }
+}
+
 /// Empty is unset: the Makefile `export`s BIND_ADDR/PORT/ALLOWED_HOSTS even
 /// when .env leaves them blank, and a blank value must not change behavior.
 fn env_nonempty(name: &str) -> Option<String> {
@@ -235,6 +269,10 @@ async fn main() -> anyhow::Result<()> {
         // The UI routes on the path (/t/<tab>/p/<pane>), so a deep link or a
         // reload asks for a file that does not exist; hand back the app.
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
+        .layer(middleware::from_fn_with_state(
+            allowed.clone(),
+            guard_origin,
+        ))
         .layer(middleware::from_fn_with_state(allowed, guard_host));
 
     // The tunnel is the sole intended ingress; the bind address decides who else
