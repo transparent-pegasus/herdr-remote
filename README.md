@@ -68,7 +68,7 @@ dial out to Cloudflare's edge, so the phone does not share a network with this
 machine. Terraform builds all of it — tunnel, route, include-mode split tunnel
 (only that /32 rides WARP; the rest of the phone's traffic goes direct), a
 device-enrollment policy pinned to one email, and a private Access application
-on `10.99.99.1:8787` requiring that same identity. Enrollment alone would let
+on `$BIND_ADDR:$PORT` requiring that same identity. Enrollment alone would let
 any process on an enrolled device drive your panes; the Access application is
 the boundary that says *who*, not just *which device*.
 
@@ -77,7 +77,7 @@ loopback — it never enters the tunnel. Binding a LAN interface would publish
 the server to everyone on that LAN, so `make` binds an alias on `lo` instead
 and enforces it with a firewall rule: Linux's weak host model would otherwise
 deliver a LAN packet aimed at a local address whatever interface it arrived on,
-so "on `lo`" is topology, and the nft rule (drop `10.99.99.1:8787` arriving
+so "on `lo`" is topology, and the nft rule (drop `$BIND_ADDR:$PORT` arriving
 off-loopback) is the enforcement. Both are re-applied by `make` when missing;
 neither needs to survive a reboot by itself (`make services` handles boot).
 
@@ -105,8 +105,10 @@ Setup, once:
    needs no manual import step.
 5. Install Cloudflare One Agent on the phone (the app formerly published as
    1.1.1.1 / WARP), log in with `TEAM_NAME`, and enrol as `USER_EMAIL`.
-6. `make deploy`, then browse to `http://10.99.99.1:8787`. The Access prompt
-   for the private app authenticates the user, not just the device.
+6. `make deploy`, then browse to `http://$BIND_ADDR:$PORT` on the phone — the
+   address and port from your `.env`, which is what `make deploy` prints and
+   what Terraform gave the Access application. `PORT` is not always `8787`.
+   The Access prompt authenticates the user, not just the device.
 
 The trade against a public hostname: the client must stay connected on the
 phone, and it occupies the device's VPN slot.

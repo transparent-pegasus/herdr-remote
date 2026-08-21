@@ -105,6 +105,7 @@ deploy: web bind-addr firewall ## build release, serve through the tunnel (foreg
 	@command -v cloudflared >/dev/null || { echo "cloudflared not found (needs >= 2025.4.0 for --token-file)"; exit 1; }
 	@test -n "$$ALLOWED_HOSTS" -o -n "$$BIND_ADDR" || { echo "Set ALLOWED_HOSTS to your public hostname, or BIND_ADDR for a private-network route — otherwise every tunnel request gets 403"; exit 1; }
 	cargo build --release
+	@test -z "$$BIND_ADDR" || echo "open http://$$BIND_ADDR:$$PORT on the enrolled device"
 	@$(BIN) & cloudflared tunnel run --token-file .tunnel-token & trap 'kill $$(jobs -p) 2>/dev/null' EXIT; wait -n
 
 services: web | $(TMP) ## persistent alternative: systemd user units + boot net setup (private route only)
@@ -131,6 +132,7 @@ services: web | $(TMP) ## persistent alternative: systemd user units + boot net 
 	systemctl --user restart herdr-remote.service cloudflared.service
 	loginctl enable-linger $$USER
 	@echo "persistent: server + tunnel restart on failure and after reboot"
+	@echo "open http://$$BIND_ADDR:$$PORT on the enrolled device"
 
 $(TMP):
 	@mkdir -p $@
