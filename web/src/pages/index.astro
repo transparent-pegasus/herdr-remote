@@ -90,6 +90,7 @@
         type Pane,
         type Session,
         type Tab,
+        type Workspace,
       } from "../lib/api";
       import { href, parseRoute, type Route } from "../lib/route";
 
@@ -157,9 +158,19 @@
         return link;
       }
 
-      function tabRow(tab: Tab) {
+      function workspaceRow(workspace: Workspace) {
+        const count =
+          workspace.tabs.length === 1 ? "1 tab" : `${workspace.tabs.length} tabs`;
+        return row(href({ workspaceId: workspace.id }), workspace.label, count);
+      }
+
+      function tabRow(workspace: Workspace, tab: Tab) {
         const count = tab.panes.length === 1 ? "1 pane" : `${tab.panes.length} panes`;
-        return row(href({ tabId: tab.id }), tab.label, count);
+        return row(
+          href({ workspaceId: workspace.id, tabId: tab.id }),
+          tab.label,
+          count,
+        );
       }
 
       // Reading the tail is the point, so follow it — unless the reader has
@@ -225,25 +236,35 @@
       /** The URL is the state: everything on screen is derived from it. */
       function render() {
         if (!session) return;
-        const { route, tab, pane: found } = current();
+        const { route, workspace, tab, pane: found } = current();
         const pane = found ?? null;
 
-        // A tab or pane can close between two renders; drop back rather than
-        // leaving a dead target addressable in the composer.
-        if (route.tabId && !tab) {
+        // A workspace, tab, or pane can close between two renders; drop back
+        // rather than leaving a dead target addressable in the composer.
+        if (route.workspaceId && !workspace) {
           go("/", true);
+          say("That workspace is gone.", true);
+          return;
+        }
+        if (route.tabId && !tab) {
+          go(href({ workspaceId: workspace!.id }), true);
           say("That tab is gone.", true);
           return;
         }
         if (route.paneId && !pane) {
-          go(href({ tabId: tab!.id }), true);
+          go(href({ workspaceId: workspace!.id, tabId: tab!.id }), true);
           say("That pane is gone.", true);
           return;
         }
 
-        headingEl.textContent = pane ? pane.label : tab ? tab.label : "Herdr Remote";
-        backEl.hidden = !tab;
-        backEl.href = pane ? href({ tabId: tab!.id }) : "/";
+        headingEl.textContent =
+          pane?.label ?? tab?.label ?? workspace?.label ?? "Herdr Remote";
+        backEl.hidden = !workspace;
+        backEl.href = pane
+          ? href({ workspaceId: workspace!.id, tabId: tab!.id })
+          : tab
+            ? href({ workspaceId: workspace!.id })
+            : "/";
 
         listEl.hidden = pane !== null;
         logEl.hidden = pane === null;
@@ -252,12 +273,18 @@
             ...(tab
               ? tab.panes.map((candidate) =>
                   row(
-                    href({ tabId: tab.id, paneId: candidate.id }),
+                    href({
+                      workspaceId: workspace!.id,
+                      tabId: tab.id,
+                      paneId: candidate.id,
+                    }),
                     candidate.label,
                     paneSubtitle(candidate),
                   ),
                 )
-              : session.tabs.map(tabRow)),
+              : workspace
+                ? workspace.tabs.map((candidate) => tabRow(workspace, candidate))
+                : session.workspaces.map(workspaceRow)),
           );
         }
         if ((pane?.id ?? null) !== watching) {
@@ -281,11 +308,19 @@
 
       /** Everything on screen derives from the URL; this is the one place that
        *  resolves it against the session. */
-      function current(): { route: Route; tab?: Tab; pane?: Pane } {
+      function current(): {
+        route: Route;
+        workspace?: Workspace;
+        tab?: Tab;
+        pane?: Pane;
+      } {
         const route = parseRoute(location.pathname);
-        const tab = session?.tabs.find((candidate) => candidate.id === route.tabId);
+        const workspace = session?.workspaces.find(
+          (candidate) => candidate.id === route.workspaceId,
+        );
+        const tab = workspace?.tabs.find((candidate) => candidate.id === route.tabId);
         const pane = tab?.panes.find((candidate) => candidate.id === route.paneId);
-        return { route, tab, pane };
+        return { route, workspace, tab, pane };
       }
 
       /** With nothing typed the same button sends the Enter key, which only an
@@ -318,7 +353,7 @@
           // business — wiping them here would flicker a genuinely failing pane
           // read every 5 s.
           if (statusEl.textContent === "Loading…") {
-            say(fresh.tabs.length ? "" : "No panes.");
+            say(fresh.workspaces.length ? "" : "No workspaces.");
           } else if (sessionFailed) {
             say(""); // our own recovery; watch re-asserts its errors within 3 s
           }

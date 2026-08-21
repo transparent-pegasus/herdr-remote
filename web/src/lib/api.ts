@@ -7,7 +7,9 @@ export type Pane = {
 
 export type Tab = { id: string; label: string; panes: Pane[] };
 
-export type Session = { tabs: Tab[] };
+export type Workspace = { id: string; label: string; tabs: Tab[] };
+
+export type Session = { workspaces: Workspace[] };
 
 /** The server's error bodies are short and human-readable; show them. */
 async function reason(response: Response, fallback: string): Promise<string> {
@@ -19,7 +21,7 @@ function isSession(value: unknown): value is Session {
 	return (
 		typeof value === "object" &&
 		value !== null &&
-		Array.isArray((value as Session).tabs)
+		Array.isArray((value as Session).workspaces)
 	);
 }
 
