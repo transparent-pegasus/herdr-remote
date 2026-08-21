@@ -8,7 +8,7 @@ A web application that connects to the herdr session's execution environment via
 
 ## Tech Stack
 
-Cloudflare Access + Cloudflare Tunnel + Terraform + Rust + TypeScript + Aube + Astro + Vitest + Biome
+Cloudflare Access + Cloudflare Tunnel + Terraform + cloudflared + systemd + nftables + Rust + TypeScript + Aube + Astro + Vitest + Biome
 
 ## Development Rules
 

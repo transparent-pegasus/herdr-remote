@@ -1,6 +1,8 @@
-export type Route = { tabId?: string; paneId?: string };
+export type Route = { workspaceId?: string; tabId?: string; paneId?: string };
 
-/** `/`, `/t/<tab>`, `/t/<tab>/p/<pane>`. Anything else reads as the root. */
+/** `/`, `/w/<workspace>`, `/w/<workspace>/t/<tab>`,
+ *  `/w/<workspace>/t/<tab>/p/<pane>`. Invalid levels fall back to
+ *  the nearest real parent. */
 export function parseRoute(pathname: string): Route {
 	let parts: string[];
 	// A hand-typed URL can carry a stray `%`, and a throw here would blank the page.
@@ -9,14 +11,17 @@ export function parseRoute(pathname: string): Route {
 	} catch {
 		return {};
 	}
-	const [t, tabId, p, paneId] = parts;
-	if (t !== "t" || !tabId) return {};
-	if (p !== "p" || !paneId) return { tabId };
-	return { tabId, paneId };
+	const [w, workspaceId, t, tabId, p, paneId] = parts;
+	if (w !== "w" || !workspaceId) return {};
+	if (t !== "t" || !tabId) return { workspaceId };
+	if (p !== "p" || !paneId) return { workspaceId, tabId };
+	return { workspaceId, tabId, paneId };
 }
 
 export function href(route: Route): string {
-	if (!route.tabId) return "/";
-	const tab = `/t/${encodeURIComponent(route.tabId)}`;
+	if (!route.workspaceId) return "/";
+	const workspace = `/w/${encodeURIComponent(route.workspaceId)}`;
+	if (!route.tabId) return workspace;
+	const tab = `${workspace}/t/${encodeURIComponent(route.tabId)}`;
 	return route.paneId ? `${tab}/p/${encodeURIComponent(route.paneId)}` : tab;
 }

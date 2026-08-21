@@ -1,0 +1,13 @@
+[Unit]
+Description=cloudflared tunnel for herdr-remote
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=@CLOUDFLARED@ tunnel run --token-file @REPO@/.tunnel-token
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

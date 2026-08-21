@@ -1,0 +1,12 @@
+# Rendered by make (sed): @BIND_ADDR@ @PORT@. The lo alias is topology, this is
+# enforcement — Linux's weak host model delivers a packet for a local address
+# whatever interface it arrived on, so a LAN peer with a static route could
+# otherwise reach the socket.
+table inet herdr-remote
+flush table inet herdr-remote
+table inet herdr-remote {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname != "lo" ip daddr @BIND_ADDR@ tcp dport @PORT@ drop
+  }
+}
