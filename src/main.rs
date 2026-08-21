@@ -179,7 +179,7 @@ async fn guard_host(State(allowed): State<Allowed>, request: Request, next: Next
         next.run(request).await
     } else {
         eprintln!("rejected Host {host:?}; allowed: {:?}", allowed.0);
-        (StatusCode::FORBIDDEN, "host not allowed").into_response()
+        no_store((StatusCode::FORBIDDEN, "host not allowed").into_response()).await
     }
 }
 
@@ -211,7 +211,7 @@ async fn guard_origin(State(allowed): State<Allowed>, request: Request, next: Ne
                 .is_ok_and(|origin| origin_allowed(origin, &allowed.0)),
         };
     if cross_site {
-        (StatusCode::FORBIDDEN, "cross-site request refused").into_response()
+        no_store((StatusCode::FORBIDDEN, "cross-site request refused").into_response()).await
     } else {
         next.run(request).await
     }
@@ -286,8 +286,9 @@ fn app(allowed: Allowed) -> Router {
 
     Router::new()
         .nest("/api", api)
-        // The UI routes on the path (/t/<tab>/p/<pane>), so a deep link or a
-        // reload asks for a file that does not exist; hand back the app.
+        // The UI routes on the path (/w/<workspace>/t/<tab>/p/<pane>), so a
+        // deep link or a reload asks for a file that does not exist; hand back
+        // the app.
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(middleware::from_fn_with_state(
             allowed.clone(),

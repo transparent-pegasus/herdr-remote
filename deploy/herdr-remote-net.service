@@ -4,8 +4,9 @@ Description=herdr-remote net setup (lo alias + nft rule)
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=@IP@ addr replace @BIND_ADDR@/32 dev lo
 ExecStart=@NFT@ -f /etc/herdr-remote.nft
+ExecStart=@IP@ addr replace @BIND_ADDR@/32 dev lo
+ExecStop=@IP@ addr del @BIND_ADDR@/32 dev lo
 
 [Install]
 WantedBy=multi-user.target

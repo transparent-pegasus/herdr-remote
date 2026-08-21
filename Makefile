@@ -52,14 +52,23 @@ setup: ## terraform the cloudflare side, write .tunnel-token
 	@command -v cloudflared >/dev/null || { echo "cloudflared not found (needs >= 2025.4.0 for --token-file) — https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"; exit 1; }
 	@{ set -a && . ./.env; } 2>/dev/null || true; test -n "$$CLOUDFLARE_API_TOKEN" -a -n "$$CLOUDFLARE_ACCOUNT_ID" -a -n "$$USER_EMAIL" -a -n "$$TEAM_NAME" \
 	  || { echo "Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, USER_EMAIL, TEAM_NAME in .env"; exit 1; }
-	@set -a && . ./.env && set +a \
+	@umask 077 \
+	  && set -a && . ./.env && set +a \
 	  && export TF_VAR_account_id="$$CLOUDFLARE_ACCOUNT_ID" TF_VAR_user_email="$$USER_EMAIL" \
 	            TF_VAR_team_name="$$TEAM_NAME" TF_VAR_bind_addr="$${BIND_ADDR:-10.99.99.1}" TF_VAR_port="$$PORT" \
 	  && terraform -chdir=infra init -input=false \
 	  && terraform -chdir=infra validate \
 	  && { terraform -chdir=infra state show cloudflare_zero_trust_device_default_profile.warp >/dev/null 2>&1 \
 	       || terraform -chdir=infra import cloudflare_zero_trust_device_default_profile.warp "$$CLOUDFLARE_ACCOUNT_ID"; } \
-	  && terraform -chdir=infra apply
+	  && { terraform -chdir=infra apply \
+	       || { status=$$?; \
+	            echo "terraform apply failed; if a WARP enrollment application already exists, import it first:"; \
+	            echo 'terraform -chdir=infra import cloudflare_zero_trust_access_application.enrollment "$$CLOUDFLARE_ACCOUNT_ID/<application-id>"'; \
+	            exit $$status; }; } \
+	  && chmod 600 infra/terraform.tfstate \
+	  && for backup in infra/*.backup; do \
+	       test ! -e "$$backup" || chmod 600 "$$backup"; \
+	     done
 	@umask 077 && terraform -chdir=infra output -raw tunnel_token > .tunnel-token.tmp \
 	  && test -s .tunnel-token.tmp \
 	  || { rm -f .tunnel-token.tmp; echo "terraform output produced no token"; exit 1; }

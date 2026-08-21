@@ -312,7 +312,8 @@ Expected: FAIL — `href` still emits `/t/<tab>` and `parseRoute` does not know 
 export type Route = { workspaceId?: string; tabId?: string; paneId?: string };
 
 /** `/`, `/w/<workspace>`, `/w/<workspace>/t/<tab>`,
- *  `/w/<workspace>/t/<tab>/p/<pane>`. Anything else reads as the root. */
+ *  `/w/<workspace>/t/<tab>/p/<pane>`. Invalid levels fall back to
+ *  the nearest real parent. */
 export function parseRoute(pathname: string): Route {
 	let parts: string[];
 	// A hand-typed URL can carry a stray `%`, and a throw here would blank the page.
