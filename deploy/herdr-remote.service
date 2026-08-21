@@ -1,0 +1,15 @@
+[Unit]
+Description=herdr-remote
+
+[Service]
+ExecStart=@BIN@
+WorkingDirectory=@REPO@
+Environment=BIND_ADDR=@BIND_ADDR@ PORT=@PORT@
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=0
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
