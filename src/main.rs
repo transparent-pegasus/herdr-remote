@@ -183,21 +183,40 @@ async fn guard_host(State(allowed): State<Allowed>, request: Request, next: Next
     }
 }
 
+/// Empty is unset: the Makefile `export`s BIND_ADDR/PORT/ALLOWED_HOSTS even
+/// when .env leaves them blank, and a blank value must not change behavior.
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// Refuse to listen where nothing authenticates: the bind must be one literal
+/// IPv4 address, and a wildcard is fatal rather than a warning — the tunnel is
+/// the only intended ingress, so there is no legitimate all-interfaces
+/// deployment. IPv4 only because the whole path (host:port strings, the lo
+/// alias, the nft rule) is IPv4-shaped.
+fn parse_bind(bind: &str) -> anyhow::Result<std::net::Ipv4Addr> {
+    let addr: std::net::Ipv4Addr = bind
+        .parse()
+        .map_err(|_| anyhow::anyhow!("BIND_ADDR must be a literal IPv4 address, got {bind:?}"))?;
+    anyhow::ensure!(
+        !addr.is_unspecified(),
+        "BIND_ADDR={bind} would listen on every interface; nothing in front of \
+         this socket authenticates. Bind 127.0.0.1 or the lo alias instead."
+    );
+    Ok(addr)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8787".into());
+    let port = env_nonempty("PORT").unwrap_or_else(|| "8787".into());
     // Default loopback. A Zero Trust private-network route needs an address the
     // WARP client can be routed to, so bind an alias on `lo` (see README) rather
     // than a LAN interface, which would also publish the server to the LAN.
-    let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".into());
-    if bind == "0.0.0.0" || bind == "::" {
-        eprintln!(
-            "WARNING: BIND_ADDR={bind} listens on every interface. Nothing in front \
-             of this socket authenticates; anyone who can route to this host can \
-             drive your panes."
-        );
-    }
-    let extra = std::env::var("ALLOWED_HOSTS").ok();
+    let bind = env_nonempty("BIND_ADDR").unwrap_or_else(|| "127.0.0.1".into());
+    parse_bind(&bind)?;
+    let extra = env_nonempty("ALLOWED_HOSTS");
     let allowed = Allowed(Arc::new(allowed_hosts(&bind, &port, extra.as_deref())));
     println!("accepting Host: {:?}", allowed.0);
 
