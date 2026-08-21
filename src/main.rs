@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, routing::any, routing::get, routing::post};
+use axum::{Json, Router, routing::get, routing::post};
 use serde::Deserialize;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -183,40 +183,133 @@ async fn guard_host(State(allowed): State<Allowed>, request: Request, next: Next
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8787".into());
-    // Default loopback. A Zero Trust private-network route needs an address the
-    // WARP client can be routed to, so bind an alias on `lo` (see README) rather
-    // than a LAN interface, which would also publish the server to the LAN.
-    let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".into());
-    if bind == "0.0.0.0" || bind == "::" {
-        eprintln!(
-            "WARNING: BIND_ADDR={bind} listens on every interface. Nothing in front \
-             of this socket authenticates; anyone who can route to this host can \
-             drive your panes."
-        );
-    }
-    let extra = std::env::var("ALLOWED_HOSTS").ok();
-    let allowed = Allowed(Arc::new(allowed_hosts(&bind, &port, extra.as_deref())));
-    println!("accepting Host: {:?}", allowed.0);
+// --- Origin gate --------------------------------------------------------------
+//
+// The bodyless POSTs (interrupt, enter) are CORS "simple" requests: a malicious
+// page anywhere can fire them without a preflight, and the browser sets Host to
+// the target's own name, so the Host allowlist passes. The Origin header is the
+// one thing such a page cannot forge; require it to match the same allowlist.
 
-    let app = Router::new()
-        .route("/api/health", get(|| async { "ok" }))
-        .route("/api/session", get(session))
-        .route("/api/panes/{pane_id}/prompt", post(prompt))
-        .route("/api/panes/{pane_id}/interrupt", post(interrupt))
-        .route("/api/panes/{pane_id}/enter", post(enter))
-        .route("/api/panes/{pane_id}/up", post(up))
-        .route("/api/panes/{pane_id}/down", post(down))
-        .route("/api/panes/{pane_id}/output", get(output))
-        // Without this, an unknown /api path would fall through to the UI and
-        // answer a fetch with 200 and a page of HTML.
-        .route("/api/{*rest}", any(|| async { StatusCode::NOT_FOUND }))
+/// Origin is scheme://host[:port]. The scheme carries no identity here (the
+/// tunnel terminates TLS), so match on host[:port] against the Host allowlist.
+fn origin_allowed(origin: &str, allowed: &[String]) -> bool {
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|host| host_allowed(host, allowed))
+}
+
+/// No Origin header (curl, native clients) passes: the gate is against
+/// browser-ambient authority, not against someone who can already reach the
+/// socket. An unreadable or unlisted Origin on a POST is refused.
+async fn guard_origin(State(allowed): State<Allowed>, request: Request, next: Next) -> Response {
+    let cross_site = request.method() == axum::http::Method::POST
+        && match request.headers().get(header::ORIGIN) {
+            None => false,
+            Some(value) => !value
+                .to_str()
+                .is_ok_and(|origin| origin_allowed(origin, &allowed.0)),
+        };
+    if cross_site {
+        (StatusCode::FORBIDDEN, "cross-site request refused").into_response()
+    } else {
+        next.run(request).await
+    }
+}
+
+/// Empty is unset: the Makefile `export`s BIND_ADDR/PORT/ALLOWED_HOSTS even
+/// when .env leaves them blank, and a blank value must not change behavior.
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// Refuse to listen where nothing authenticates: the bind must be one literal
+/// IPv4 address, and a wildcard is fatal rather than a warning — the tunnel is
+/// the only intended ingress, so there is no legitimate all-interfaces
+/// deployment. IPv4 only because the whole path (host:port strings, the lo
+/// alias, the nft rule) is IPv4-shaped.
+fn parse_bind(bind: &str) -> anyhow::Result<std::net::Ipv4Addr> {
+    let addr: std::net::Ipv4Addr = bind
+        .parse()
+        .map_err(|_| anyhow::anyhow!("BIND_ADDR must be a literal IPv4 address, got {bind:?}"))?;
+    anyhow::ensure!(
+        !addr.is_unspecified(),
+        "BIND_ADDR={bind} would listen on every interface; nothing in front of \
+         this socket authenticates. Bind 127.0.0.1 or the lo alias instead."
+    );
+    Ok(addr)
+}
+
+async fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Applied outermost so even a guard's 403 carries the headers. frame-ancestors
+/// replaces X-Frame-Options; a page that cannot frame the UI cannot clickjack
+/// its buttons.
+async fn harden(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    response
+}
+
+fn app(allowed: Allowed) -> Router {
+    // no-store on /api only: pane output and session state are live, but the
+    // hashed UI assets should stay cacheable for a phone on mobile data.
+    let api = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/session", get(session))
+        .route("/panes/{pane_id}/prompt", post(prompt))
+        .route("/panes/{pane_id}/interrupt", post(interrupt))
+        .route("/panes/{pane_id}/enter", post(enter))
+        .route("/panes/{pane_id}/up", post(up))
+        .route("/panes/{pane_id}/down", post(down))
+        .route("/panes/{pane_id}/output", get(output))
+        // Without this, an unknown /api path — including bare /api and /api/,
+        // which a {*rest} route would NOT match — falls through the nest to the
+        // UI and answers a fetch with 200 and a page of HTML.
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(middleware::map_response(no_store));
+
+    Router::new()
+        .nest("/api", api)
         // The UI routes on the path (/t/<tab>/p/<pane>), so a deep link or a
         // reload asks for a file that does not exist; hand back the app.
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
-        .layer(middleware::from_fn_with_state(allowed, guard_host));
+        .layer(middleware::from_fn_with_state(
+            allowed.clone(),
+            guard_origin,
+        ))
+        .layer(middleware::from_fn_with_state(allowed, guard_host))
+        .layer(middleware::map_response(harden))
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let port = env_nonempty("PORT").unwrap_or_else(|| "8787".into());
+    // Default loopback. A Zero Trust private-network route needs an address the
+    // WARP client can be routed to, so bind an alias on `lo` (see README) rather
+    // than a LAN interface, which would also publish the server to the LAN.
+    let bind = env_nonempty("BIND_ADDR").unwrap_or_else(|| "127.0.0.1".into());
+    parse_bind(&bind)?;
+    let extra = env_nonempty("ALLOWED_HOSTS");
+    let allowed = Allowed(Arc::new(allowed_hosts(&bind, &port, extra.as_deref())));
+    println!("accepting Host: {:?}", allowed.0);
+
+    let app = app(allowed);
 
     // The tunnel is the sole intended ingress; the bind address decides who else
     // can even open a socket.
@@ -272,5 +365,103 @@ mod tests {
         // A suffix is not a match, and local work still reaches the server.
         assert!(!host_allowed("herdr.example.com.evil.net", &allowed));
         assert!(host_allowed("127.0.0.1:8787", &allowed));
+    }
+
+    #[test]
+    fn wildcard_and_non_literal_binds_are_fatal() {
+        assert!(parse_bind("0.0.0.0").is_err());
+        assert!(parse_bind("::").is_err());
+        assert!(parse_bind("0:0:0:0:0:0:0:0").is_err());
+        // IPv4 only: everything downstream — the host:port string, the lo
+        // alias, the nft rule — is IPv4-shaped, so accepting ::1 here would
+        // just move the failure somewhere less legible.
+        assert!(parse_bind("::1").is_err());
+        assert!(parse_bind("example.com").is_err());
+        assert!(parse_bind("").is_err());
+        assert!(parse_bind("10.99.99.1").is_ok());
+        assert!(parse_bind("127.0.0.1").is_ok());
+    }
+
+    #[test]
+    fn empty_env_is_unset() {
+        // The Makefile exports BIND_ADDR/PORT/ALLOWED_HOSTS even when .env
+        // leaves them blank; blank must behave exactly like absent.
+        unsafe { std::env::set_var("HERDR_REMOTE_TEST_EMPTY", " ") };
+        assert_eq!(env_nonempty("HERDR_REMOTE_TEST_EMPTY"), None);
+        unsafe { std::env::set_var("HERDR_REMOTE_TEST_EMPTY", "x") };
+        assert_eq!(env_nonempty("HERDR_REMOTE_TEST_EMPTY"), Some("x".into()));
+    }
+
+    #[test]
+    fn origins_match_the_host_allowlist() {
+        let allowed = allowed_hosts("10.99.99.1", "8787", Some("herdr.example.com"));
+        assert!(origin_allowed("http://10.99.99.1:8787", &allowed));
+        assert!(origin_allowed("http://127.0.0.1:8787", &allowed));
+        assert!(origin_allowed("https://herdr.example.com", &allowed));
+        assert!(!origin_allowed("https://evil.example.com", &allowed));
+        // A sandboxed iframe or data: page sends the literal string "null".
+        assert!(!origin_allowed("null", &allowed));
+        assert!(!origin_allowed("", &allowed));
+        // Scheme is required — a bare host is not an Origin.
+        assert!(!origin_allowed("10.99.99.1:8787", &allowed));
+    }
+
+    #[tokio::test]
+    async fn responses_are_hardened() {
+        use tower::ServiceExt;
+        let allowed = Allowed(Arc::new(allowed_hosts("127.0.0.1", "8787", None)));
+        let request = |method: &str, path: &str, origin: Option<&str>| {
+            let mut builder = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::HOST, "127.0.0.1:8787");
+            if let Some(origin) = origin {
+                builder = builder.header(header::ORIGIN, origin);
+            }
+            builder.body(axum::body::Body::empty()).unwrap()
+        };
+
+        // API responses must never be cached, and every response names its type.
+        let response = app(allowed.clone())
+            .oneshot(request("GET", "/api/health", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "frame-ancestors 'none'"
+        );
+
+        // A cross-site bodyless POST is refused before it reaches herdr.
+        let response = app(allowed.clone())
+            .oneshot(request("POST", "/api/panes/x/enter", Some("https://evil.example.com")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // The refusal itself still carries the hardening headers.
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+
+        // A same-origin POST passes the gate: it reaches the handler, which
+        // fails on the absent herdr socket — anything but 403 proves passage.
+        let response = app(allowed.clone())
+            .oneshot(request("POST", "/api/panes/x/enter", Some("http://127.0.0.1:8787")))
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+
+        // An unknown or bare /api path is an API 404, never the UI's HTML.
+        for path in ["/api/nope", "/api", "/api/"] {
+            let response = app(allowed.clone()).oneshot(request("GET", path, None)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+
+        // A rejected Host is refused whatever the path.
+        let mut bad_host = request("GET", "/api/health", None);
+        bad_host.headers_mut().insert(header::HOST, "evil.example.com".parse().unwrap());
+        let response = app(allowed).oneshot(bad_host).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
