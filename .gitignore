@@ -7,6 +7,9 @@ web/.astro/
 .env
 .tmp/
 .worktrees/
-.wrangler/
+.tunnel-token*
+infra/.terraform/
+infra/*.tfstate*
+infra/terraform.tfstate.d/
 .herdrpowers/
 .codegraph/
