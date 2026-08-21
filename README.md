@@ -13,7 +13,7 @@ Single Rust binary (Axum) serving the API and the static Astro UI from `web/dist
 
 ```
 GET  /api/health                     # "ok"
-GET  /api/session                    # {"tabs":[{"id","label","panes":[{"id","label","agent","state"}]}]}
+GET  /api/session                    # {"workspaces":[{"id","label","tabs":[{"id","label","panes":[{"id","label","agent","state"}]}]}]}
 POST /api/panes/{pane_id}/prompt     # {"text": "..."} -> 204; 404 for an unknown pane
 POST /api/panes/{pane_id}/interrupt  # Esc to an agent's turn -> 204; 403 for a shell pane, 404 unknown
 POST /api/panes/{pane_id}/enter      # Enter, for the question an agent is showing; same rules
@@ -28,9 +28,11 @@ UI cannot be framed (`frame-ancestors 'none'`).
 
 `/api/session` reshapes Herdr's `session.snapshot` rather than forwarding it, so a
 schema change on the Herdr side stops at the server instead of reaching the phone.
-The UI keeps its state in the path — `/` lists tabs, `/t/<tab>` lists that tab's
-panes, `/t/<tab>/p/<pane>` is one pane's log, polled every 3 seconds while that
-page is open and in the foreground, with the composer aimed at it. So anything
+The UI keeps its state in the path, one segment per level of Herdr's own
+hierarchy — `/` lists workspaces, `/w/<workspace>` lists that workspace's tabs,
+`/w/<workspace>/t/<tab>` lists that tab's panes, and
+`/w/<workspace>/t/<tab>/p/<pane>` is one pane's log, polled every 3 seconds
+while that page is open and in the foreground, with the composer aimed at it. So anything
 outside `/api` that is not a file in `web/dist` is answered with `index.html`,
 and an unknown `/api` path still 404s instead of handing a fetch a page of HTML.
 
