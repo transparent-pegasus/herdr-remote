@@ -277,9 +277,16 @@ mod tests {
 
     fn snapshot_fixture() -> Snapshot {
         serde_json::from_value(json!({
+            "workspaces": [
+                { "workspace_id": "w1", "label": "backend" },
+                { "workspace_id": "w2", "label": "frontend" },
+                { "workspace_id": "w3", "label": "empty workspace" }
+            ],
             "tabs": [
-                { "tab_id": "w1:t1", "label": "backend" },
-                { "tab_id": "w1:t2", "label": "empty" }
+                { "tab_id": "w1:t1", "workspace_id": "w1", "label": "backend" },
+                { "tab_id": "w1:t2", "workspace_id": "w1", "label": "empty" },
+                { "tab_id": "w2:t1", "workspace_id": "w2", "label": "web" },
+                { "tab_id": "w3:t1", "workspace_id": "w3", "label": "orphan" }
             ],
             "panes": [
                 { "pane_id": "w1:p1", "tab_id": "w1:t1", "agent": "claude",
@@ -289,6 +296,8 @@ mod tests {
                 { "pane_id": "w1:p4", "tab_id": "w1:t1", "agent": null,
                   "agent_status": "idle", "label": "renamed",
                   "title": "ignored terminal title" },
+                { "pane_id": "w2:p1", "tab_id": "w2:t1", "agent": "codex",
+                  "agent_status": "working", "title": "ui" },
                 { "pane_id": "w1:p3", "tab_id": "w1:tX", "agent": null,
                   "agent_status": "unknown" }
             ]
@@ -373,15 +382,21 @@ mod tests {
     }
 
     #[test]
-    fn groups_panes_under_their_tab() {
+    fn groups_panes_under_their_tab_and_workspace() {
         let session = to_session(snapshot_fixture());
 
-        // The empty tab is dropped, and so is the pane whose tab is not listed.
-        assert_eq!(session.tabs.len(), 1);
-        let tab = &session.tabs[0];
-        assert_eq!(tab.id, "w1:t1");
-        assert_eq!(tab.panes.len(), 3);
+        // The workspace whose only tab holds no pane is dropped, as is the
+        // empty tab inside a workspace that survives.
+        assert_eq!(session.workspaces.len(), 2);
+        let backend = &session.workspaces[0];
+        assert_eq!(backend.id, "w1");
+        assert_eq!(backend.label, "backend");
+        assert_eq!(backend.tabs.len(), 1);
 
+        let tab = &backend.tabs[0];
+        assert_eq!(tab.id, "w1:t1");
+        // The pane whose tab is not listed is still dropped.
+        assert_eq!(tab.panes.len(), 3);
         assert_eq!(
             tab.panes[0],
             Pane {
@@ -396,5 +411,12 @@ mod tests {
         assert_eq!(tab.panes[1].agent, None);
         // A herdr rename wins over the terminal title.
         assert_eq!(tab.panes[2].label, "renamed");
+
+        // A tab belongs to exactly one workspace: w2's tab is not under w1.
+        let frontend = &session.workspaces[1];
+        assert_eq!(frontend.id, "w2");
+        assert_eq!(frontend.tabs.len(), 1);
+        assert_eq!(frontend.tabs[0].panes.len(), 1);
+        assert_eq!(frontend.tabs[0].panes[0].id, "w2:p1");
     }
 }
