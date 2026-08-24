@@ -13,9 +13,18 @@
   </head>
   <body>
     <header>
-      <a id="back" href="/" hidden aria-label="Back">&#8592;</a>
+      <a id="back" href="/" hidden aria-label="Back">
+        <svg viewBox="0 0 24 24" aria-hidden="true"
+          ><path d="m12 19-7-7 7-7" /><path d="M19 12H5"
+        /></svg>
+      </a>
       <h1 id="heading">Herdr Remote</h1>
-      <button id="refresh" type="button" aria-label="Reload">&#8635;</button>
+      <button id="refresh" type="button" aria-label="Reload">
+        <svg viewBox="0 0 24 24" aria-hidden="true"
+          ><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1.06 6.74 2.74L21 8" /><path
+            d="M21 3v5h-5"
+        /></svg>
+      </button>
     </header>
 
     <noscript>This page needs JavaScript to list panes and send prompts.</noscript>
@@ -28,7 +37,7 @@
       <label for="text" id="target"></label>
       <textarea
         id="text"
-        rows="4"
+        rows="2"
         disabled
         placeholder="Type an instruction…"></textarea>
       <div id="actions">
@@ -436,7 +445,14 @@
       downEl.addEventListener("click", () =>
         act(downEl, "down", (id) => pressArrow(id, "down")),
       );
-      textEl.addEventListener("input", syncSend);
+      textEl.addEventListener("input", () => {
+        syncSend();
+        // Past five rows the box stops growing and the caret can sit below the
+        // fold. Only when typing at the very end: mid-text edits keep their view.
+        if (textEl.selectionStart === textEl.value.length) {
+          textEl.scrollTop = textEl.scrollHeight;
+        }
+      });
 
       composerEl.addEventListener("submit", (event) => {
         event.preventDefault();
@@ -566,13 +582,22 @@
         font-size: 0.85rem;
         color: var(--muted);
       }
+      /* Two rows to start, growing with what is typed and capped at five —
+         past that it scrolls. field-sizing does the growing; `rows` is the
+         floor a browser without it lands on. The bounds are border-box, so
+         they carry the 0.5rem padding and the 1px border themselves. */
       textarea {
+        box-sizing: border-box;
+        field-sizing: content;
+        min-height: calc(2lh + 1rem + 2px);
+        max-height: calc(5lh + 1rem + 2px);
         padding: 0.5rem;
         border: 1px solid var(--edge);
         border-radius: 0.5rem;
         background: none;
         color: inherit;
         font: inherit;
+        font-size: 0.85rem;
         resize: vertical;
       }
       /* Equal columns, not `flex: 1` — a flex item's share follows its content,
@@ -588,10 +613,10 @@
         display: grid;
         place-items: center;
       }
-      #actions svg {
+      /* lucide is stroke-drawn throughout, `play` included. */
+      svg {
         width: 20px;
         height: 20px;
-        /* lucide is stroke-drawn throughout, `play` included. */
         fill: none;
         stroke: currentColor;
         stroke-width: 2;
@@ -607,32 +632,38 @@
       #actions button:disabled {
         opacity: 0.35;
       }
+      /* 36px, two thirds of the 54px the row used to stand at, and a border-box
+         height so the number on the page is the number here. */
       #composer button {
-        min-height: 44px;
-        padding: 0.75rem;
+        box-sizing: border-box;
+        min-height: 36px;
+        padding: 4px;
         border: 1px solid var(--edge);
         border-radius: 0.5rem;
         background: none;
         color: inherit;
         font: inherit;
       }
-      /* One slot, two keys: the pair stacks into the width of a single action
-         and the row grows by the second row's height. 24px each is the WCAG
-         2.2 AA floor (2.5.8) — the same trade the header makes below, for the
-         same reason. Must follow the rule above, which it overrides. */
+      /* One slot, two keys, side by side: stacked, the pair set the row's
+         height, and two thirds of that leaves each key under the 24px WCAG 2.2
+         AA floor (2.5.8). Sharing the slot's width keeps both keys the full
+         36px tall. Must follow the rule above, which it overrides. */
       #nav {
         display: grid;
-        gap: 6px;
+        grid-template-columns: 1fr 1fr;
+        gap: 4px;
       }
       #nav button {
-        min-height: 24px;
         padding: 0;
       }
       /* 24px is the WCAG 2.2 AA floor (2.5.8), below Apple's 44pt guidance —
          a deliberate trade for a header that does not dominate a phone screen.
-         Fixed height and line-height 1: the two arrow glyphs have different
-         intrinsic heights, so anything content-driven leaves the pair
-         mismatched. */
+         Fixed height so the pair matches whatever it holds. */
+      #refresh svg,
+      #back svg {
+        width: 14px;
+        height: 14px;
+      }
       #refresh,
       #back {
         box-sizing: border-box;
@@ -645,10 +676,6 @@
         border-radius: 0.5rem;
         background: none;
         color: inherit;
-        font: inherit;
-        font-size: 0.85rem;
-        line-height: 1;
-        text-decoration: none;
       }
       #more {
         margin-bottom: 0.5rem;
