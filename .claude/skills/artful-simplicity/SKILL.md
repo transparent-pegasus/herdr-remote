@@ -1,21 +1,13 @@
 ---
 name: artful-simplicity
-description: Audit code, tests, and prose for artful simplicity; use for design, over-engineering, and redundancy reviews.
+description: Audit code, tests, and prose for artful simplicity; use for readability, design, refactoring, over-engineering, and redundancy reviews.
 ---
 
 # Artful simplicity
 
-A unit is simple when a cold reader can name its one idea, predict its contents
-from its name, and keep nothing unrelated in mind. Tests cover only logic; prose
-says only what is needed.
+A unit is simple when a cold reader can name its one idea, predict its contents from its name, and keep nothing unrelated in mind. Tests state observable behavior and invariants; prose spends exactly the words it needs.
 
-Local reading judges clarity, not necessity. It may justify `rewrite`; `delete`,
-`fold`, and boundary moves remain hypotheses. Evidence required: for deletion,
-repository-wide reachability, invariant protection, and consequence of removal;
-for folding, equivalence across every observable state and transition—including
-partial, repeated, cancelled, restarted, and error paths; for boundaries,
-convergence of at least two independent readings.
+Local reading judges clarity, not necessity. Rewrite may follow from sight only if no observer sees behavior change; delete, fold, and move require, respectively, proof of reachability and consequence, equivalence across observable states and transitions, and independent agreement on the boundary. Seek contradictions, not volume.
 
-Seek contradictions, not volume. Before behavior changes, state the change,
-reachable observer, safety direction, and what the opposite choice breaks.
-Direction decides, not size.
+Before changing behavior, name the change, the observer, the safety direction, and the broken alternative. Direction decides, not size.
+
