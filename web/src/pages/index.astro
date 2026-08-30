@@ -41,7 +41,7 @@
         disabled
         placeholder="Type an instruction…"></textarea>
       <div id="actions">
-        <button id="stop" type="button" disabled aria-label="Stop (Esc)" title="Stop">
+        <button id="stop" type="button" disabled aria-label="Stop" title="Stop">
           <svg viewBox="0 0 24 24" aria-hidden="true"
             ><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"
           /></svg>
@@ -310,8 +310,10 @@
         // no menu, and the server refuses them there anyway.
         goEl.disabled = pushEl.disabled = upEl.disabled = downEl.disabled =
           !pane?.agent;
-        // Esc only means something to an agent, and only mid-turn.
-        stopEl.disabled = !pane?.agent || pane.state !== "working";
+        // Mid-turn the button is esc; otherwise it clears the agent's context.
+        stopEl.disabled = !pane?.agent;
+        const clears = pane?.state !== "working";
+        stopEl.ariaLabel = stopEl.title = clears ? "/clear" : "Stop";
         syncSend();
       }
 
@@ -428,9 +430,12 @@
         }
       }
 
-      stopEl.addEventListener("click", () =>
-        act(stopEl, "Stop", (id) => interruptPane(id)),
-      );
+      stopEl.addEventListener("click", () => {
+        const working = current().pane?.state === "working";
+        return act(stopEl, working ? "Stop" : "/clear", (id) =>
+          working ? interruptPane(id) : sendPrompt(id, "/clear"),
+        );
+      });
       goEl.addEventListener("click", () =>
         act(goEl, "go", (id) => sendPrompt(id, "go")),
       );
