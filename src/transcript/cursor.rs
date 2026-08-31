@@ -10,16 +10,13 @@ use serde_json::Value;
 
 use super::{Message, Role, preamble};
 
-/// Read-only, but never `immutable`: a live session keeps a `-wal` file, and an
-/// immutable open reads the pre-WAL pages and finds no tables at all. Measured
-/// against a running cursor session.
+/// Open the path directly: URI parsing decodes `%HH` in path components after
+/// the caller's boundary check. Read-only is enough, but `immutable=1` must
+/// never come back: a live session keeps a `-wal` file, and an immutable open
+/// reads the pre-WAL pages and finds no tables at all.
 fn open_ro(db: &Path) -> Result<Connection> {
-    let uri = format!("file:{}?mode=ro", db.display());
-    Connection::open_with_flags(
-        &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )
-    .with_context(|| format!("open cursor store at {}", db.display()))
+    Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("open cursor store at {}", db.display()))
 }
 
 fn root_of(connection: &Connection) -> Result<String> {
@@ -216,6 +213,22 @@ mod tests {
         assert!(blob_ids(&[0x0a, 32, 0, 0]).is_err());
         assert!(blob_ids(&[0x12, 32]).is_err());
         assert!(blob_ids(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_percent_encoded_parent_cannot_escape_the_cursor_root() {
+        let home = tempdir();
+        let chats = home.join(".cursor/chats");
+        let claimed = chats.join("%2e%2e/store.db");
+        std::fs::create_dir_all(claimed.parent().unwrap()).unwrap();
+        std::fs::write(&claimed, []).unwrap();
+
+        let outside = home.join(".cursor");
+        let outside_store = store(&outside, &[("assistant", "outside")]);
+        assert_eq!(outside_store, outside.join("store.db"));
+
+        let guarded = super::super::guard("cursor", claimed, &home).unwrap();
+        assert!(read(&guarded).is_err());
     }
 
     /// A scratch directory. The test process removes it on the way in rather
