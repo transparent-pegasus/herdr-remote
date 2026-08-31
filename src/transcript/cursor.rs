@@ -120,16 +120,19 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[allow(clippy::chunks_exact_to_as_chunks)]
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    text.len()
-        .is_multiple_of(2)
-        .then(|| {
-            (0..text.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
-                .collect::<Option<Vec<u8>>>()
+    let mut chunks = text.as_bytes().chunks_exact(2);
+    let decoded = chunks
+        .by_ref()
+        .map(|pair| {
+            if !pair.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
         })
-        .flatten()
+        .collect::<Option<Vec<_>>>()?;
+    chunks.remainder().is_empty().then_some(decoded)
 }
 
 #[cfg(test)]
@@ -213,6 +216,27 @@ mod tests {
         assert!(blob_ids(&[0x0a, 32, 0, 0]).is_err());
         assert!(blob_ids(&[0x12, 32]).is_err());
         assert!(blob_ids(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_and_non_ascii_hex_is_refused() {
+        for value in ["aéa", "éé", "0g", "f", "💣"] {
+            assert_eq!(decode_hex(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_meta_returns_an_error_without_unwinding() {
+        let dir = tempdir();
+        let path = store(&dir, &[("user", "hello")]);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute("update meta set value = 'aéa'", [])
+            .unwrap();
+        drop(connection);
+
+        let outcome = std::panic::catch_unwind(|| read(&path));
+        assert!(matches!(outcome, Ok(Err(_))));
     }
 
     #[test]
