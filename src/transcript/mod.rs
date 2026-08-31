@@ -2,6 +2,8 @@
 //! running on the alternate screen keeps no scrollback, so the file is the only
 //! place its finished answers still exist.
 
+mod preamble;
+
 use serde::Serialize;
 
 /// Only the two speakers survive normalization. Tool calls, tool output,
