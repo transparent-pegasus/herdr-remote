@@ -1,3 +1,5 @@
+import type { Card, Page } from "./transcript";
+
 export type Pane = {
 	id: string;
 	label: string;
@@ -144,3 +146,112 @@ export function isTransient(error: unknown): boolean {
 		error instanceof TypeError
 	);
 }
+
+export type Live = { screen: string; composer: string };
+
+/** The newest-window ETag per pane. Cleared when a pane stops having a
+ *  transcript, so a later attach starts from a real request. */
+const etags = new Map<string, string>();
+
+export function forgetPane(paneId: string): void {
+	etags.delete(paneId);
+}
+
+function isCard(value: unknown): value is Card {
+	const card = value as Card;
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof card.seq === "number" &&
+		(card.role === "user" || card.role === "assistant") &&
+		typeof card.preview === "string" &&
+		typeof card.html === "string"
+	);
+}
+
+function isPage(value: unknown): value is Page {
+	const body = value as Page;
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		Array.isArray(body.messages) &&
+		body.messages.every(isCard) &&
+		typeof body.has_more === "boolean"
+	);
+}
+
+/** `null` means the pane has no transcript — a shell, or an agent whose session
+ *  file could not be resolved — and the caller falls back to raw output.
+ *  `"unchanged"` is the 304 that keeps a quiet poll free. */
+export async function fetchTranscript(
+	paneId: string,
+	before?: number,
+	signal?: AbortSignal,
+): Promise<Page | "unchanged" | null> {
+	const newest = before === undefined;
+	const url = `${paneUrl(paneId, "transcript")}?limit=30${newest ? "" : `&before=${before}`}`;
+	const etag = newest ? etags.get(paneId) : undefined;
+	const response = await fetch(url, {
+		signal,
+		headers: etag ? { "if-none-match": etag } : undefined,
+	});
+	if (response.status === 404) {
+		etags.delete(paneId);
+		return null;
+	}
+	if (response.status === 304) return "unchanged";
+	if (!response.ok) {
+		throw new Error(await reason(response, "could not load the transcript"));
+	}
+	const tag = response.headers.get("etag");
+	if (newest && tag) etags.set(paneId, tag);
+	const body: unknown = await response.json();
+	if (!isPage(body)) {
+		throw new Error("unexpected response from the transcript route");
+	}
+	return body;
+}
+
+function isLive(value: unknown): value is Live {
+	const live = value as Live;
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof live.screen === "string" &&
+		typeof live.composer === "string"
+	);
+}
+
+/** The terminal's own screen, plus the first line of whatever is typed into the
+ *  agent's box. Both are width-dependent; the transcript is not. */
+export async function fetchLive(
+	paneId: string,
+	signal?: AbortSignal,
+): Promise<Live> {
+	const response = await fetch(paneUrl(paneId, "live"), { signal });
+	if (!response.ok) {
+		throw new Error(await reason(response, "could not read the pane"));
+	}
+	const body: unknown = await response.json();
+	if (!isLive(body)) {
+		throw new Error("unexpected response from the live route");
+	}
+	return body;
+}
+
+/** Zooming the pane is what makes its screen legible on a phone: a picker
+ *  rendered into twenty columns is destroyed before it is ever read. */
+export const openPane = (paneId: string): Promise<void> =>
+	post(paneUrl(paneId, "open"), "could not open the pane");
+
+/** `keepalive`, because this also fires from `pagehide`, when ordinary requests
+ *  are cancelled along with the page. A close that is lost anyway is repaired
+ *  by the server's next `open`, so nothing here needs to be awaited. */
+export function closePane(paneId: string): void {
+	void fetch(paneUrl(paneId, "close"), {
+		method: "POST",
+		keepalive: true,
+	}).catch(() => {});
+}
+
+export type { Card, Page };
