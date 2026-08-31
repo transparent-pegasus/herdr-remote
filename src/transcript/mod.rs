@@ -149,11 +149,14 @@ pub fn resolve(pane: &PaneRef, home: &Path) -> Option<Source> {
             let path = match pane.session_value {
                 Some(id) => {
                     let wanted = format!("-{id}.jsonl");
-                    files(&sessions, 4).into_iter().find(|path| {
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|name| name.ends_with(&wanted))
-                    })
+                    files(&sessions, 4)
+                        .into_iter()
+                        .filter(|path| {
+                            path.file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|name| name.ends_with(&wanted))
+                        })
+                        .max()
                 }
                 None => newest_rollout_for(&sessions, pane.cwd),
             }
@@ -575,6 +578,28 @@ mod resolution_tests {
             Source::Lines { path, format } => {
                 assert_eq!(format, Format::Codex);
                 assert!(path.to_string_lossy().ends_with("-bbb.jsonl"), "{path:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_codex_id_resolves_to_its_newest_matching_rollout() {
+        let home = scratch();
+        let id = "same-id";
+        let older = home
+            .join(".codex/sessions/2026/08/31")
+            .join(format!("rollout-2026-08-31T23-59-00-{id}.jsonl"));
+        let newer = home
+            .join(".codex/sessions/2026/09/01")
+            .join(format!("rollout-2026-09-01T00-01-00-{id}.jsonl"));
+        touch(&older);
+        touch(&newer);
+
+        match resolve(&pane("codex", Some(id), "/repo"), &home).unwrap() {
+            Source::Lines { path, format } => {
+                assert_eq!(format, Format::Codex);
+                assert_eq!(path, newer.canonicalize().unwrap());
             }
             other => panic!("{other:?}"),
         }
