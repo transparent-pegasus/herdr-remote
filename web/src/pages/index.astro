@@ -380,7 +380,7 @@
         logEl.scrollTop = following ? logEl.scrollHeight : top;
       }
 
-      function watch(pane: Pane | null) {
+      async function watch(pane: Pane | null) {
         clearTimeout(timer);
         if (watching && watching !== pane?.id) closePane(watching);
         watching = pane?.id ?? null;
@@ -395,11 +395,11 @@
         moreEl.hidden = true;
         resetLive();
         if (!pane) return;
-        if (pane.id !== watching) return;
 
         forgetPane(pane.id);
         liveEl.hidden = !pane.agent;
-        void openPane(pane.id).catch(() => {});
+        await openPane(pane.id).catch(() => {});
+        if (pane.id !== watching) return;
 
         const token = ++watches;
         const loop = async () => {
@@ -532,7 +532,7 @@
           );
         }
         if ((pane?.id ?? null) !== watching) {
-          watch(pane);
+          void watch(pane);
           if (pane) textEl.focus();
         }
 
