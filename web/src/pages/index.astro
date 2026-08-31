@@ -423,10 +423,11 @@
         if (!pane || token !== watches) return;
         const signal = AbortSignal.timeout(15000);
 
+        let live: Live | undefined;
         let liveError: unknown;
         if (pane.agent) {
           try {
-            const live = await fetchLive(pane.id, signal);
+            live = await fetchLive(pane.id, signal);
             if (token !== watches) return;
             paintLive(live, pane.state);
           } catch (error) {
@@ -456,15 +457,20 @@
           cards = [];
           transcriptEl.hidden = true;
           logEl.hidden = false;
-          const output = await fetchOutput(
-            pane.id,
-            lines,
-            pane.agent ? "screen" : "scrollback",
-            signal,
-          );
-          if (token !== watches) return;
-          paint(output.text);
-          moreEl.hidden = !output.truncated;
+          if (pane.agent) {
+            if (live) paint(live.screen);
+            moreEl.hidden = true;
+          } else {
+            const output = await fetchOutput(
+              pane.id,
+              lines,
+              "scrollback",
+              signal,
+            );
+            if (token !== watches) return;
+            paint(output.text);
+            moreEl.hidden = !output.truncated;
+          }
         }
 
         // The transcript is the durable surface, so a failed live read is
