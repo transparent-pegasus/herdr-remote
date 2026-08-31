@@ -381,6 +381,7 @@
       }
 
       async function watch(pane: Pane | null) {
+        const token = ++watches;
         clearTimeout(timer);
         if (watching && watching !== pane?.id) closePane(watching);
         watching = pane?.id ?? null;
@@ -399,9 +400,8 @@
         forgetPane(pane.id);
         liveEl.hidden = !pane.agent;
         await openPane(pane.id).catch(() => {});
-        if (pane.id !== watching) return;
+        if (token !== watches) return;
 
-        const token = ++watches;
         const loop = async () => {
           if (!document.hidden) {
             try {
@@ -718,14 +718,17 @@
       // Reading further back keeps the reader where they are: paint() only
       // follows the tail when they were already at it.
       moreEl.addEventListener("click", async () => {
-        if (!watching) return;
+        const paneId = watching;
+        const token = watches;
+        if (!paneId) return;
         if (transcriptEl.hidden) {
           lines = Math.min(lines * 4, MAX_LINES);
           moreEl.hidden = true;
           return;
         }
         const oldest = cards[0]?.seq;
-        const page = await fetchTranscript(watching, oldest);
+        const page = await fetchTranscript(paneId, oldest);
+        if (token !== watches || paneId !== watching) return;
         if (page === null || page === "unchanged") return;
         const fromBottom = transcriptEl.scrollHeight - transcriptEl.scrollTop;
         cards = prepend(page.messages, cards);
