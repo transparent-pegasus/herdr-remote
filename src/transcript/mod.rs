@@ -6,6 +6,7 @@ mod preamble;
 mod claude;
 mod codex;
 mod grok;
+mod cursor;
 
 use serde::Serialize;
 
