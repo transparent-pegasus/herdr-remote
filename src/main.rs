@@ -104,7 +104,10 @@ enum Source {
 impl Source {
     fn as_herdr(self) -> &'static str {
         match self {
-            Source::Scrollback => "recent",
+            // `recent` hands back rows already broken at the pane's width, so a
+            // narrow pane's output arrives pre-wrapped and unreadable on a
+            // phone; the unwrapped source joins the soft wraps back up.
+            Source::Scrollback => "recent_unwrapped",
             Source::Screen => "visible",
         }
     }
@@ -341,6 +344,12 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollback_asks_herdr_to_unwrap() {
+        assert_eq!(Source::Scrollback.as_herdr(), "recent_unwrapped");
+        assert_eq!(Source::Screen.as_herdr(), "visible");
+    }
 
     #[test]
     fn bare_keys_reach_agents_only() {
