@@ -10,7 +10,7 @@ pulldown-cmark = { version = "0.13.4", default-features = false, features = ["ht
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 tower-http = { version = "0.7.0", features = ["fs"] }
 
 [dev-dependencies]
