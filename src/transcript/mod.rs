@@ -113,6 +113,9 @@ fn claude_slug(cwd: &str) -> String {
 }
 
 pub fn resolve(pane: &PaneRef, home: &Path) -> Option<Source> {
+    if home.as_os_str().is_empty() {
+        return None;
+    }
     if pane.session_kind == Some("path") {
         let path = guard(pane.agent, PathBuf::from(pane.session_value?), home)?;
         return source_for(pane.agent, path);
