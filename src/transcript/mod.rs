@@ -586,3 +586,244 @@ mod resolution_tests {
         assert!(resolve(&pane("devin", Some("x"), "/repo"), &home).is_none());
     }
 }
+
+use std::io::{Seek, SeekFrom};
+
+/// A parsed transcript plus the bookkeeping that lets a poll skip the file
+/// entirely when nothing was appended.
+pub struct Transcript {
+    source: Source,
+    /// Bytes already parsed, for a line source. Unused for a blob store.
+    offset: u64,
+    /// The file length last observed. It can sit ahead of `offset` while an
+    /// agent is midway through writing a line; remembering it is what stops
+    /// every later poll from reopening the file to re-read that same fragment.
+    len: u64,
+    /// Next message's position, which keeps growing across refreshes.
+    next_seq: u64,
+    /// The blob store's root id, which changes when the conversation grows.
+    root: String,
+    messages: Vec<Message>,
+}
+
+impl Transcript {
+    pub fn open(source: Source) -> Self {
+        Self {
+            source,
+            offset: 0,
+            len: 0,
+            next_seq: 0,
+            root: String::new(),
+            messages: Vec::new(),
+        }
+    }
+
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// What the response's ETag carries. Same value means the phone already has
+    /// this conversation and the body can be skipped.
+    pub fn version(&self) -> String {
+        match &self.source {
+            Source::Lines { .. } => self.offset.to_string(),
+            Source::CursorDb { .. } => self.root.clone(),
+        }
+    }
+
+    pub fn refresh(&mut self) -> Result<()> {
+        match self.source.clone() {
+            Source::Lines { path, format } => self.refresh_lines(&path, format),
+            Source::CursorDb { path } => {
+                // One row read answers "did anything change"; walking every
+                // blob is reserved for when it did.
+                let root = cursor::root_id(&path)?;
+                if root != self.root {
+                    let (root, messages) = cursor::read(&path)?;
+                    self.root = root;
+                    self.messages = messages;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn refresh_lines(&mut self, path: &Path, format: Format) -> Result<()> {
+        let len = std::fs::metadata(path)
+            .with_context(|| format!("stat {}", path.display()))?
+            .len();
+        if len == self.len {
+            return Ok(());
+        }
+        self.len = len;
+        if len < self.offset {
+            // Truncated or rotated: the offset now points past the end, so the
+            // only honest reading is from the start.
+            self.offset = 0;
+            self.next_seq = 0;
+            self.messages.clear();
+        }
+
+        let mut file =
+            std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = reader.read_line(&mut line)?;
+            if read == 0 {
+                break;
+            }
+            // A line still being written has no terminator yet; leave it for the
+            // next refresh rather than parsing half an object.
+            if !line.ends_with('\n') {
+                break;
+            }
+            self.offset += read as u64;
+            let parsed = match format {
+                Format::Claude => claude::parse_line(&line, self.next_seq),
+                Format::Codex => codex::parse_line(&line, self.next_seq),
+                Format::Grok => grok::parse_line(&line, self.next_seq),
+            };
+            if let Some(message) = parsed {
+                self.messages.push(message);
+                self.next_seq += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn scratch_file() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-remote-cache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("session.jsonl")
+    }
+
+    fn append(path: &Path, line: &str) {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
+
+    fn user(text: &str) -> String {
+        serde_json::json!({ "type": "user", "message": { "content": text } }).to_string()
+    }
+
+    #[test]
+    fn an_append_parses_only_the_new_bytes() {
+        let path = scratch_file();
+        append(&path, &user("first"));
+        let mut transcript = Transcript::open(Source::Lines {
+            path: path.clone(),
+            format: Format::Claude,
+        });
+        transcript.refresh().unwrap();
+        assert_eq!(transcript.messages().len(), 1);
+        let after_first = transcript.version();
+
+        append(&path, &user("second"));
+        transcript.refresh().unwrap();
+        assert_eq!(transcript.messages().len(), 2);
+        assert_eq!(transcript.messages()[1].seq, 1);
+        assert_ne!(transcript.version(), after_first);
+    }
+
+    /// The point of the offset: a line already parsed is never read again. If
+    /// the refresh silently reparsed from the start, the corrupted first line
+    /// would take the message it produced with it.
+    #[test]
+    fn an_already_parsed_line_survives_being_corrupted_afterwards() {
+        let path = scratch_file();
+        append(&path, &user("first"));
+        let mut transcript = Transcript::open(Source::Lines {
+            path: path.clone(),
+            format: Format::Claude,
+        });
+        transcript.refresh().unwrap();
+
+        // Same byte length, so only the content changes and the offset stays
+        // meaningful; the line now types as something the parser drops.
+        let corrupted = std::fs::read_to_string(&path)
+            .unwrap()
+            .replacen("\"user\"", "\"brok\"", 1);
+        std::fs::write(&path, corrupted).unwrap();
+        append(&path, &user("second"));
+        transcript.refresh().unwrap();
+
+        assert_eq!(transcript.messages().len(), 2);
+        assert_eq!(transcript.messages()[0].text, "first");
+        assert_eq!(transcript.messages()[1].text, "second");
+    }
+
+    #[test]
+    fn an_unchanged_file_leaves_the_version_alone() {
+        let path = scratch_file();
+        append(&path, &user("only"));
+        let mut transcript = Transcript::open(Source::Lines {
+            path,
+            format: Format::Claude,
+        });
+        transcript.refresh().unwrap();
+        let version = transcript.version();
+        transcript.refresh().unwrap();
+        assert_eq!(transcript.version(), version);
+        assert_eq!(transcript.messages().len(), 1);
+    }
+
+    #[test]
+    fn a_shrunk_file_is_read_from_the_start() {
+        let path = scratch_file();
+        append(&path, &user("first"));
+        append(&path, &user("second"));
+        let mut transcript = Transcript::open(Source::Lines {
+            path: path.clone(),
+            format: Format::Claude,
+        });
+        transcript.refresh().unwrap();
+        assert_eq!(transcript.messages().len(), 2);
+
+        std::fs::write(&path, format!("{}\n", user("only one now"))).unwrap();
+        transcript.refresh().unwrap();
+        assert_eq!(transcript.messages().len(), 1);
+        assert_eq!(transcript.messages()[0].text, "only one now");
+        assert_eq!(transcript.messages()[0].seq, 0);
+    }
+
+    #[test]
+    fn a_half_written_line_waits_for_its_newline() {
+        let path = scratch_file();
+        append(&path, &user("complete"));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(file, "{}", user("still being written")).unwrap();
+        drop(file);
+
+        let mut transcript = Transcript::open(Source::Lines {
+            path: path.clone(),
+            format: Format::Claude,
+        });
+        transcript.refresh().unwrap();
+        assert_eq!(transcript.messages().len(), 1);
+
+        append(&path, "");
+        transcript.refresh().unwrap();
+        assert_eq!(transcript.messages().len(), 2);
+    }
+}
