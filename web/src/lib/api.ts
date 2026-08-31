@@ -239,8 +239,9 @@ export async function fetchLive(
 	return body;
 }
 
-/** Zooming the pane is what makes its screen legible on a phone: a picker
- *  rendered into twenty columns is destroyed before it is ever read. */
+/** Zooming gives the pane the whole herdr window: a picker rendered into twenty
+ *  columns is destroyed before it is ever read. How wide that ends up being is
+ *  the operator's window, not something this code predicts. */
 export const openPane = (paneId: string): Promise<void> =>
 	post(paneUrl(paneId, "open"), "could not open the pane");
 

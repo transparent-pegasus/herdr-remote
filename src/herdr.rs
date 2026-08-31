@@ -235,8 +235,9 @@ pub async fn pane_context(pane_id: &str) -> Result<Option<PaneContext>> {
         }))
 }
 
-/// A pane rendered into twenty columns destroys anything it draws; zooming is
-/// what makes a picker readable from the phone.
+/// A pane rendered into twenty columns destroys anything it draws. Zooming
+/// hands it the whole herdr window instead — as wide as the operator keeps that
+/// window, which is all this can do and why nothing here expects a width.
 pub async fn zoom(pane_id: &str, on: bool) -> Result<()> {
     call("pane.zoom", json!({ "pane_id": pane_id, "zoomed": on })).await?;
     Ok(())
