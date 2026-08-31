@@ -6,6 +6,7 @@ import {
 	paneSubtitle,
 	pressArrow,
 	stateIndicator,
+	stopPresentation,
 } from "./api";
 
 const session = {
@@ -96,6 +97,22 @@ test("agent panes show agent and state", () => {
 
 test("agentless panes read as a plain shell", () => {
 	expect(paneSubtitle(pane())).toBe("shell");
+});
+
+test("a working pane presents the stop action with a hand", () => {
+	expect(stopPresentation("working")).toEqual({
+		label: "Stop",
+		icon: "hand",
+		interrupts: true,
+	});
+});
+
+test("a pane that is not working presents clear with an eraser", () => {
+	expect(stopPresentation("idle")).toEqual({
+		label: "/clear",
+		icon: "eraser",
+		interrupts: false,
+	});
 });
 
 test("a timed-out request is transient, so the UI retries", () => {
