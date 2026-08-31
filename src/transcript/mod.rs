@@ -4,6 +4,7 @@
 
 mod preamble;
 mod claude;
+mod codex;
 
 use serde::Serialize;
 
