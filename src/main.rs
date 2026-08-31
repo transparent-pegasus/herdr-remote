@@ -18,7 +18,8 @@ type ApiResult<T> = Result<T, (StatusCode, &'static str)>;
 
 /// One parsed transcript per pane, keyed with the source it was parsed from so
 /// a pane that starts a new session does not keep serving the old one.
-type Cache = Arc<Mutex<HashMap<String, (transcript::Source, Transcript)>>>;
+type CacheEntry = (transcript::Source, Arc<Mutex<Transcript>>);
+type Cache = Arc<Mutex<HashMap<String, CacheEntry>>>;
 
 /// The single pane this server has zoomed. A `tokio` mutex, because the
 /// transition awaits herdr while holding it: two concurrent opens must not
@@ -213,22 +214,44 @@ fn take_window(
     before: Option<u64>,
     limit: usize,
 ) -> anyhow::Result<Option<(String, Vec<transcript::Message>, bool)>> {
-    let mut map = cache
+    let entry = {
+        let mut map = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
+        let stale = map.get(&key).is_none_or(|(cached, _)| *cached != source);
+        if stale {
+            map.insert(
+                key.clone(),
+                (
+                    source.clone(),
+                    Arc::new(Mutex::new(Transcript::open(source))),
+                ),
+            );
+        }
+        Arc::clone(
+            &map.get(&key)
+                .ok_or_else(|| anyhow::anyhow!("transcript cache entry disappeared"))?
+                .1,
+        )
+    };
+    let mut transcript = entry
         .lock()
-        .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
-    let stale = map.get(&key).is_none_or(|(cached, _)| *cached != source);
-    if stale {
-        map.insert(key.clone(), (source.clone(), Transcript::open(source)));
-    }
-    let (_, transcript) = map
-        .get_mut(&key)
-        .ok_or_else(|| anyhow::anyhow!("transcript cache entry disappeared"))?;
+        .map_err(|_| anyhow::anyhow!("transcript cache entry is poisoned"))?;
     if let Err(error) = transcript.refresh() {
         let missing = error
             .downcast_ref::<std::io::Error>()
             .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
         if missing {
-            map.remove(&key);
+            drop(transcript);
+            let mut map = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
+            if map
+                .get(&key)
+                .is_some_and(|(_, cached)| Arc::ptr_eq(cached, &entry))
+            {
+                map.remove(&key);
+            }
             return Ok(None);
         }
         return Err(error);
@@ -643,6 +666,46 @@ mod tests {
 
         assert!(matches!(result, Ok(None)));
         assert!(!cache.lock().unwrap().contains_key("pane"));
+    }
+
+    #[test]
+    fn a_busy_transcript_does_not_lock_the_whole_cache() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-remote-busy-transcript-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let source = line_source(path);
+        let transcript = Arc::new(Mutex::new(Transcript::open(source.clone())));
+        let cache = Cache::default();
+        cache
+            .lock()
+            .unwrap()
+            .insert("busy".into(), (source.clone(), Arc::clone(&transcript)));
+        let held = transcript.lock().unwrap();
+        let worker_cache = cache.clone();
+        let worker =
+            std::thread::spawn(move || take_window(worker_cache, "busy".into(), source, None, 30));
+
+        while Arc::strong_count(&transcript) < 3 {
+            std::thread::yield_now();
+        }
+        let (sent, received) = std::sync::mpsc::channel();
+        let probe_cache = cache.clone();
+        let probe = std::thread::spawn(move || {
+            let _map = probe_cache.lock().unwrap();
+            sent.send(()).unwrap();
+        });
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_ok()
+        );
+
+        drop(held);
+        assert!(matches!(worker.join().unwrap(), Ok(None)));
+        probe.join().unwrap();
     }
 
     #[test]
