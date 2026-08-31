@@ -293,7 +293,7 @@
 
       let session: Session | null = null;
       let watching: string | null = null;
-      let timer: ReturnType<typeof setInterval> | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       let sessionJson = "";
       let loading = false;
       let sessionFailed = false;
@@ -380,51 +380,92 @@
         logEl.scrollTop = following ? logEl.scrollHeight : top;
       }
 
-      /** Poll the open pane's output; one pane is watched at a time. */
       function watch(pane: Pane | null) {
-        clearInterval(timer);
+        clearTimeout(timer);
+        if (watching && watching !== pane?.id) closePane(watching);
         watching = pane?.id ?? null;
-        // Each pane starts from the small window; widening is per visit.
-        lines = LINES;
+        cards = [];
+        paintedCards = [];
         painted = "";
+        lines = LINES;
+        transcriptEl.replaceChildren();
+        transcriptEl.hidden = true;
+        logEl.hidden = true;
+        liveEl.hidden = true;
         moreEl.hidden = true;
+        resetLive();
         if (!pane) return;
+        if (pane.id !== watching) return;
 
-        const mine = ++watches;
-        const tick = async () => {
-          if (document.hidden) return; // a backgrounded phone tab polls nothing
-          try {
-            const output = await fetchOutput(
-              pane.id,
-              lines,
-              // An agent redraws its screen in place: asking for scrollback
-              // there returns redraw history that differs on every read, so the
-              // log would never settle. Its screen is all it has anyway.
-              // Read it fresh rather than from the pane this watch started on:
-              // attaching an agent to the pane already open is an ordinary
-              // move, and the session poll sees it while the id never changes.
-              current().pane?.agent ? "screen" : "scrollback",
-              AbortSignal.timeout(15000),
-            );
-            if (mine !== watches) return; // a later pane already owns the view
-            paint(output.text);
-            // An agent pane in a full-screen TUI keeps no scrollback, so this
-            // stays hidden there however far back the window reaches.
-            moreEl.hidden = !output.truncated || lines >= MAX_LINES;
-            // The interval keeps running through a failure, so the recovery is
-            // what has to clear the warning it left behind.
-            if (statusEl.classList.contains("error")) say("");
-          } catch (error) {
-            if (mine !== watches) return;
-            // Keep polling a pane that is merely slow; a closed one shows up as
-            // gone on the next session reload.
-            complain(error, "Could not read.");
+        forgetPane(pane.id);
+        liveEl.hidden = !pane.agent;
+        void openPane(pane.id).catch(() => {});
+
+        const token = ++watches;
+        const loop = async () => {
+          if (!document.hidden) {
+            try {
+              await tick(token);
+              if (statusEl.classList.contains("error")) say("");
+            } catch (error) {
+              complain(error, "could not read the pane");
+            }
           }
+          if (token === watches) timer = setTimeout(loop, POLL_MS);
         };
-        logEl.textContent = "";
-        tick();
-        timer = setInterval(tick, POLL_MS);
+        void loop();
       }
+
+      async function tick(token: number) {
+        // The session poll replaces the pane object as its state and agent change,
+        // and `render()` does not restart a watch whose id is unchanged.
+        const pane = current().pane;
+        if (!pane || token !== watches) return;
+        const signal = AbortSignal.timeout(15000);
+
+        if (pane.agent) {
+          const live = await fetchLive(pane.id, signal);
+          if (token !== watches) return;
+          paintLive(live, pane.state);
+        }
+        liveEl.hidden = !pane.agent;
+
+        // A shell has no transcript by definition; asking anyway would spend a
+        // request per tick to be told so.
+        const page = pane.agent
+          ? await fetchTranscript(pane.id, undefined, signal)
+          : null;
+        if (token !== watches) return;
+
+        if (page !== null) {
+          transcriptEl.hidden = false;
+          logEl.hidden = true;
+          if (page !== "unchanged") {
+            cards = append(cards, page.messages);
+            paintCards();
+            moreEl.hidden = !page.has_more;
+          }
+          return;
+        }
+
+        // Raw output: an agent pane keeps the visible screen, whose redraw history
+        // does not churn, and a shell keeps its scrollback.
+        transcriptEl.hidden = true;
+        logEl.hidden = false;
+        const output = await fetchOutput(
+          pane.id,
+          lines,
+          pane.agent ? "screen" : "scrollback",
+          signal,
+        );
+        if (token !== watches) return;
+        paint(output.text);
+        moreEl.hidden = !output.truncated;
+      }
+
+      addEventListener("pagehide", () => {
+        if (watching) closePane(watching);
+      });
 
       /** The URL is the state: everything on screen is derived from it. */
       function render() {
@@ -460,7 +501,7 @@
             : "/";
 
         listEl.hidden = pane !== null;
-        logEl.hidden = pane === null;
+        if (!pane) { logEl.hidden = true; transcriptEl.hidden = true; }
         if (!pane) {
           listEl.replaceChildren(
             ...(tab
@@ -661,10 +702,21 @@
 
       // Reading further back keeps the reader where they are: paint() only
       // follows the tail when they were already at it.
-      moreEl.addEventListener("click", () => {
-        lines = Math.min(lines * 4, MAX_LINES);
-        moreEl.hidden = true;
-        say("Reading further back…");
+      moreEl.addEventListener("click", async () => {
+        if (!watching) return;
+        if (transcriptEl.hidden) {
+          lines = Math.min(lines * 4, MAX_LINES);
+          moreEl.hidden = true;
+          return;
+        }
+        const oldest = cards[0]?.seq;
+        const page = await fetchTranscript(watching, oldest);
+        if (page === null || page === "unchanged") return;
+        const fromBottom = transcriptEl.scrollHeight - transcriptEl.scrollTop;
+        cards = prepend(page.messages, cards);
+        paintCards();
+        transcriptEl.scrollTop = transcriptEl.scrollHeight - fromBottom;
+        moreEl.hidden = !page.has_more;
       });
 
       refreshEl.addEventListener("click", () => {
