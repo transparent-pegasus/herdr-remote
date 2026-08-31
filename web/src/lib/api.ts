@@ -107,6 +107,16 @@ export function paneSubtitle(pane: Pane): string {
 	return pane.agent ? `${pane.agent} · ${pane.state}` : "shell";
 }
 
+/** The stop button interrupts an active turn and clears an inactive one. */
+export function stopPresentation(state: string) {
+	const interrupts = state === "working";
+	return {
+		label: interrupts ? "Stop" : "/clear",
+		icon: interrupts ? "hand" : "eraser",
+		interrupts,
+	} as const;
+}
+
 /** A timed-out or dropped request is expected here rather than exceptional: the
  *  phone sleeps, WARP reconnects, the tunnel blips. Callers retry instead of
  *  surfacing "signal timed out", which reads as a fault the user must act on. */
