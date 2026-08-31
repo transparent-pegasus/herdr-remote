@@ -38,27 +38,59 @@ POST /api/panes/{pane_id}/up         # Up, to move the selection in it; same rul
 POST /api/panes/{pane_id}/down       # Down, likewise
 GET  /api/panes/{pane_id}/output     # plain text; ?lines=1..20000 (default 300),
                                      # ?source=scrollback|screen; x-truncated: true when more remains
+GET  /api/panes/{pane_id}/transcript # {"messages":[{"seq","role","preview","html"}],"has_more"};
+                                     # ?limit=1..200 (default 30), ?before=<seq> reaches further back;
+                                     # ETag + 304 on an unchanged window;
+                                     # 404 "no transcript for this pane" means use output instead
+GET  /api/panes/{pane_id}/live       # {"screen","composer"} — the pane's whole visible screen,
+                                     # and the first line of its unsent draft
+POST /api/panes/{pane_id}/open       # zoom this pane on the desktop -> 204
+POST /api/panes/{pane_id}/close      # release it -> 204
 ```
 
 Cross-site mutating requests are refused by `Origin`, API responses are `no-store`, and the
-UI cannot be framed (`frame-ancestors 'none'`).
+UI cannot be framed (`frame-ancestors 'none'`). `no-store` stops the browser from
+revalidating on its own, so the transcript's 304 comes from an `If-None-Match` the phone
+sends out of a per-pane ETag it keeps itself — which is what makes polling a transcript
+that can reach tens of megabytes cost nothing while it is quiet.
+
+`transcript` reads the agent's own session file — Claude, Codex, Cursor and Grok each keep
+one — because a pane running on the alternate screen keeps no scrollback, so its finished
+answers exist nowhere else. The path comes from herdr's `agent_session`, which any process
+on the herdr socket can report, so the server canonicalizes it and requires that agent's
+own root (`~/.claude/projects`, `~/.codex/sessions`, `~/.cursor/chats`,
+`~/.grok/sessions`) and that agent's own file shape. Anything else resolves to "no
+transcript" and the pane falls back to `output`, which is also what a shell pane gets.
+`?source=scrollback` asks herdr for `recent_unwrapped`, so a line longer than the pane is
+wide arrives whole instead of pre-broken at the pane's width.
 
 `/api/session` reshapes Herdr's `session.snapshot` rather than forwarding it, so a
 schema change on the Herdr side stops at the server instead of reaching the phone.
 The UI keeps its state in the path, one segment per level of Herdr's own
 hierarchy — `/` lists workspaces, `/w/<workspace>` lists that workspace's tabs,
 `/w/<workspace>/t/<tab>` lists that tab's panes, and
-`/w/<workspace>/t/<tab>/p/<pane>` is one pane's log, polled every 3 seconds
-while that page is open and in the foreground, with the composer aimed at it. So anything
+`/w/<workspace>/t/<tab>/p/<pane>` is one pane, polled every 3 seconds
+while that page is open and in the foreground, with the composer aimed at it. An agent
+pane shows its transcript as cards clamped to three lines, each opening the whole message
+in a dialog, with a one-row live band beneath carrying the unsent draft, a hammer while
+the pane is working, and a button that shows the raw screen — where a model picker or a
+permission prompt lives, since neither ever reaches the transcript. Any pane without a
+resolvable transcript shows the raw log instead. So anything
 outside `/api` that is not a file in `web/dist` is answered with `index.html`,
 and an unknown `/api` path still 404s instead of handing a fetch a page of HTML.
 
 `prompt` picks its Herdr call per pane: `agent.prompt` where an agent is attached,
-otherwise `pane.send_input` with a trailing `enter`.
+otherwise `pane.send_input` with a trailing `enter`. `open` and `close` call `pane.zoom`:
+a pane rendered into twenty columns destroys anything it draws, so the pane being read is
+zoomed for as long as it is open. The server holds one slot, and the next `open` releases
+whatever the last one left — a phone that dies mid-session is repaired by the next visit
+rather than by a timer.
 
 The bare-key routes are agent-only, enforced server-side: a shell pane would
 execute whatever sits on its command line, so the server answers 403 rather
-than trusting the UI's disabled buttons.
+than trusting the UI's disabled buttons. `open` and `close` are the exception by design —
+they only change how wide a pane is drawn, and raw output wants that width as much as a
+transcript does.
 
 ## Development
 
@@ -168,7 +200,8 @@ make deploy    # release build + cloudflared, foreground, dies with the terminal
 make services  # or: systemd user units + boot-time net setup, restarts on failure and reboot
 ```
 
-Both need `cloudflared` >= 2025.4.0 on PATH (for `--token-file`) and a
+Both need `cloudflared` >= 2025.4.0 on PATH (for `--token-file`), a working `cc`
+toolchain (SQLite is compiled in, to read Cursor's session store), and a
 `.tunnel-token` from `make setup`. `make services` is private-route only (it
 requires `BIND_ADDR`); the public-hostname route runs `make deploy`. The server
 refuses wildcard, IPv6, and non-literal binds outright; `bind-addr` asks for
