@@ -469,7 +469,7 @@
             );
             if (token !== watches) return;
             paint(output.text);
-            moreEl.hidden = !output.truncated;
+            moreEl.hidden = !output.truncated || lines >= MAX_LINES;
           }
         }
 
