@@ -204,11 +204,11 @@ export async function fetchTranscript(
 		throw new Error(await reason(response, "could not load the transcript"));
 	}
 	const tag = response.headers.get("etag");
-	if (newest && tag) etags.set(paneId, tag);
 	const body: unknown = await response.json();
 	if (!isPage(body)) {
 		throw new Error("unexpected response from the transcript route");
 	}
+	if (newest && tag) etags.set(paneId, tag);
 	return body;
 }
 

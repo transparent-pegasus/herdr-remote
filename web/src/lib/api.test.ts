@@ -244,6 +244,32 @@ test("a transcript page that is not shaped like one is refused", async () => {
 	}
 });
 
+test("a malformed transcript page does not poison the etag cache", async () => {
+	forgetPane("w1:p1");
+	const seen: Array<string | undefined> = [];
+	const fetchMock = stubFetch((_url, init) => {
+		seen.push(
+			(init?.headers as Record<string, string> | undefined)?.["if-none-match"],
+		);
+		return seen.length === 1
+			? page({ messages: [{ seq: "one" }] }, { etag: '"bad"' })
+			: page({ messages: [], has_more: false });
+	});
+	vi.stubGlobal("fetch", fetchMock);
+	try {
+		await expect(fetchTranscript("w1:p1")).rejects.toThrow(
+			/unexpected response/,
+		);
+		await expect(fetchTranscript("w1:p1")).resolves.toEqual({
+			messages: [],
+			has_more: false,
+		});
+	} finally {
+		vi.unstubAllGlobals();
+	}
+	expect(seen).toEqual([undefined, undefined]);
+});
+
 test("live returns the screen and the composer line", async () => {
 	vi.stubGlobal(
 		"fetch",
