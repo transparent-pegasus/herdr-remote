@@ -414,6 +414,16 @@ async fn close(
     State(state): State<AppState>,
     Path(pane_id): Path<String>,
 ) -> ApiResult<StatusCode> {
+    state
+        .transcripts
+        .lock()
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not release the transcript",
+            )
+        })?
+        .remove(&pane_id);
     let mut slot = state.zoomed.0.lock().await;
     if slot.as_deref() != Some(pane_id.as_str()) {
         return Ok(StatusCode::NO_CONTENT);
@@ -884,6 +894,24 @@ mod tests {
             newest_text(&cache, &changed, &home).as_deref(),
             Some("ready")
         );
+    }
+
+    #[tokio::test]
+    async fn close_releases_the_panes_cached_transcript() {
+        let state = AppState::default();
+        let identity = transcript_identity();
+        insert_cached(
+            &state.transcripts,
+            "pane",
+            &identity,
+            line_source(std::path::PathBuf::from("unused.jsonl")),
+        );
+
+        assert_eq!(
+            close(State(state.clone()), Path("pane".into())).await,
+            Ok(StatusCode::NO_CONTENT)
+        );
+        assert!(!state.transcripts.lock().unwrap().contains_key("pane"));
     }
 
     #[test]
