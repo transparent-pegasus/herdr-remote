@@ -11,9 +11,13 @@ fn options() -> Options {
 /// A destination the page may follow. Anything with a scheme that is not
 /// http, https, or mailto is emptied — `javascript:` and `data:` included.
 fn safe_url(dest: CowStr<'_>) -> CowStr<'_> {
-    let scheme = dest.split(':').next().unwrap_or_default();
+    let scheme = dest
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let relative = !dest.contains(':') || scheme.contains('/');
-    if relative || ["http", "https", "mailto"].contains(&scheme) {
+    if relative || ["http", "https", "mailto"].contains(&scheme.as_str()) {
         dest
     } else {
         "".into()
@@ -139,6 +143,13 @@ mod tests {
         assert!(html.contains(r#"<a href="">click</a>"#));
         assert!(html.contains(r#"href="https://herdr.dev""#));
         assert!(html.contains(r#"href="./a.md""#));
+    }
+
+    #[test]
+    fn schemes_are_matched_case_insensitively_without_unblocking_javascript() {
+        let html = to_html("[ok](HTTP://example.com) [bad](JavaScript:alert(1))");
+        assert!(html.contains(r#"href="HTTP://example.com""#));
+        assert!(html.contains(r#"<a href="">bad</a>"#));
     }
 
     #[test]
