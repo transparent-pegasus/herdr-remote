@@ -423,10 +423,15 @@
         if (!pane || token !== watches) return;
         const signal = AbortSignal.timeout(15000);
 
+        let liveError: unknown;
         if (pane.agent) {
-          const live = await fetchLive(pane.id, signal);
-          if (token !== watches) return;
-          paintLive(live, pane.state);
+          try {
+            const live = await fetchLive(pane.id, signal);
+            if (token !== watches) return;
+            paintLive(live, pane.state);
+          } catch (error) {
+            liveError = error;
+          }
         }
         liveEl.hidden = !pane.agent;
 
@@ -445,23 +450,26 @@
             paintCards();
             moreEl.hidden = !page.has_more;
           }
-          return;
+        } else {
+          // Raw output: an agent pane keeps the visible screen, whose redraw history
+          // does not churn, and a shell keeps its scrollback.
+          cards = [];
+          transcriptEl.hidden = true;
+          logEl.hidden = false;
+          const output = await fetchOutput(
+            pane.id,
+            lines,
+            pane.agent ? "screen" : "scrollback",
+            signal,
+          );
+          if (token !== watches) return;
+          paint(output.text);
+          moreEl.hidden = !output.truncated;
         }
 
-        // Raw output: an agent pane keeps the visible screen, whose redraw history
-        // does not churn, and a shell keeps its scrollback.
-        cards = [];
-        transcriptEl.hidden = true;
-        logEl.hidden = false;
-        const output = await fetchOutput(
-          pane.id,
-          lines,
-          pane.agent ? "screen" : "scrollback",
-          signal,
-        );
-        if (token !== watches) return;
-        paint(output.text);
-        moreEl.hidden = !output.truncated;
+        // The transcript is the durable surface, so a failed live read is
+        // reported only after the transcript request had its chance to paint.
+        if (liveError !== undefined) throw liveError;
       }
 
       addEventListener("pagehide", () => {
