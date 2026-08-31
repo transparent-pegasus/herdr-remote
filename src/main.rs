@@ -203,31 +203,39 @@ fn card(message: &transcript::Message) -> Card {
 }
 
 /// Parsing a cold transcript — forty-four megabytes at the extreme — reading
-/// SQLite, and rendering markdown are all synchronous. `None` means the source
-/// stopped being readable, which is the raw-output fallback rather than an
-/// error.
+/// SQLite, and rendering markdown are all synchronous. Only a source that went
+/// missing becomes `None`; other failures keep the cache and reach the client
+/// as an error.
 fn take_window(
     cache: Cache,
     key: String,
     source: transcript::Source,
     before: Option<u64>,
     limit: usize,
-) -> Option<(String, Vec<transcript::Message>, bool)> {
-    let mut map = cache.lock().ok()?;
+) -> anyhow::Result<Option<(String, Vec<transcript::Message>, bool)>> {
+    let mut map = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
     let stale = map.get(&key).is_none_or(|(cached, _)| *cached != source);
     if stale {
         map.insert(key.clone(), (source.clone(), Transcript::open(source)));
     }
-    let (_, transcript) = map.get_mut(&key)?;
-    if transcript.refresh().is_err() {
-        // The file went away, or the store is damaged. Half a history is worse
-        // than none: drop it and let the pane fall back.
-        map.remove(&key);
-        return None;
+    let (_, transcript) = map
+        .get_mut(&key)
+        .ok_or_else(|| anyhow::anyhow!("transcript cache entry disappeared"))?;
+    if let Err(error) = transcript.refresh() {
+        let missing = error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if missing {
+            map.remove(&key);
+            return Ok(None);
+        }
+        return Err(error);
     }
     let version = transcript.version();
     let (messages, has_more) = window(transcript.messages(), before, limit);
-    Some((version, messages.to_vec(), has_more))
+    Ok(Some((version, messages.to_vec(), has_more)))
 }
 
 /// A pane with no resolvable transcript answers 404: the phone reads that as
@@ -268,7 +276,8 @@ async fn transcript_route(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "could not read the transcript",
             )
-        })?;
+        })?
+        .map_err(failed("could not read the transcript"))?;
     let Some((version, messages, has_more)) = taken else {
         return Err((StatusCode::NOT_FOUND, "no transcript for this pane"));
     };
@@ -594,6 +603,46 @@ mod tests {
                 text: format!("m{seq}"),
             })
             .collect()
+    }
+
+    fn line_source(path: std::path::PathBuf) -> transcript::Source {
+        transcript::Source::Lines {
+            path,
+            format: transcript::Format::Claude,
+        }
+    }
+
+    #[test]
+    fn a_non_missing_refresh_error_keeps_the_cached_transcript() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-remote-refresh-error-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        let cache = Cache::default();
+
+        let result = take_window(cache.clone(), "pane".into(), line_source(path), None, 30);
+
+        assert!(result.is_err());
+        assert!(cache.lock().unwrap().contains_key("pane"));
+    }
+
+    #[test]
+    fn a_missing_transcript_drops_its_cache_entry() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-remote-missing-transcript-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let cache = Cache::default();
+
+        let result = take_window(cache.clone(), "pane".into(), line_source(path), None, 30);
+
+        assert!(matches!(result, Ok(None)));
+        assert!(!cache.lock().unwrap().contains_key("pane"));
     }
 
     #[test]
