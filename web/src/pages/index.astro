@@ -30,7 +30,7 @@
     <noscript>This page needs JavaScript to list panes and send prompts.</noscript>
     <p id="status" role="status"></p>
     <div id="list"></div>
-    <button id="more" type="button" hidden>Load earlier output</button>
+    <button id="more" type="button" hidden>Load earlier</button>
     <ol id="transcript" hidden></ol>
     <dialog id="full">
       <div class="body"></div>
@@ -196,12 +196,15 @@
       function cardEl(card: Card) {
         const item = document.createElement("li");
         item.dataset.role = card.role;
-        item.dataset.seq = String(card.seq);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.seq = String(card.seq);
         const preview = document.createElement("p");
         preview.className = "preview";
         // textContent: a preview is the speaker's words, not our markup.
         preview.textContent = card.preview;
-        item.append(preview);
+        button.append(preview);
+        item.append(button);
         return item;
       }
 
@@ -231,8 +234,10 @@
       }
 
       transcriptEl.addEventListener("click", (event) => {
-        const item = (event.target as Element | null)?.closest("li");
-        const seq = Number(item?.dataset.seq);
+        const button = (event.target as Element | null)?.closest<HTMLButtonElement>(
+          "button[data-seq]",
+        );
+        const seq = Number(button?.dataset.seq);
         const card = cards.find((candidate) => candidate.seq === seq);
         if (card) openCard(card);
       });
@@ -809,7 +814,17 @@
       }
       #transcript li {
         border-radius: 10px;
+      }
+      #transcript li > button {
+        display: block;
+        width: 100%;
+        border: 0;
+        border-radius: inherit;
         padding: 0.5rem 0.7rem;
+        color: inherit;
+        background: transparent;
+        font: inherit;
+        text-align: left;
         cursor: pointer;
       }
       #transcript li[data-role="user"] {
@@ -839,7 +854,6 @@
       }
       #full .body.wrap {
         white-space: pre-wrap;
-        font-family: ui-monospace, monospace;
       }
       #full .body pre,
       #full .body table {
