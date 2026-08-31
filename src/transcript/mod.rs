@@ -224,6 +224,10 @@ fn encode_cwd(cwd: &str) -> String {
         .collect()
 }
 
+fn real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
 /// Every file under `dir`, at most `depth` directories deep. One walker, so the
 /// four agents differ in what they filter for rather than in how they search.
 fn files(dir: &Path, depth: usize) -> Vec<PathBuf> {
@@ -233,7 +237,13 @@ fn files(dir: &Path, depth: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
             if depth > 0 {
                 out.extend(files(&path, depth - 1));
             }
@@ -260,7 +270,7 @@ fn newest_child(dir: &Path) -> Option<PathBuf> {
     entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
+        .filter(|path| real_dir(path))
         .max_by_key(|path| modified(path))
 }
 
@@ -276,7 +286,10 @@ fn cursor_created_at(chats: &Path, id: &str) -> Option<u64> {
     std::fs::read_dir(chats)
         .ok()?
         .flatten()
-        .map(|project| project.path().join(id))
+        .map(|project| project.path())
+        .filter(|project| real_dir(project))
+        .map(|project| project.join(id))
+        .filter(|dir| real_dir(dir))
         .find_map(|dir| {
             cursor_meta(&dir)?
                 .get("createdAtMs")
@@ -306,11 +319,18 @@ fn cursor_store(
 
     let mut best: Option<(bool, u64, PathBuf)> = None;
     for project in std::fs::read_dir(&chats).ok()?.flatten() {
-        let Ok(sessions) = std::fs::read_dir(project.path()) else {
+        let project = project.path();
+        if !real_dir(&project) {
+            continue;
+        }
+        let Ok(sessions) = std::fs::read_dir(project) else {
             continue;
         };
         for session in sessions.flatten() {
             let dir = session.path();
+            if !real_dir(&dir) {
+                continue;
+            }
             let Some(meta) = cursor_meta(&dir) else {
                 continue;
             };
@@ -472,6 +492,25 @@ mod resolution_tests {
         std::fs::create_dir_all(inside.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&outside, &inside).unwrap();
         assert!(guard("claude", inside, &home).is_none());
+    }
+
+    #[test]
+    fn directory_walks_do_not_follow_symlinked_directories() {
+        let home = scratch();
+        let root = home.join("root");
+        let inside = root.join("real/inside.jsonl");
+        let outside = home.join("outside/secret.jsonl");
+        touch(&inside);
+        touch(&outside);
+        std::os::unix::fs::symlink(outside.parent().unwrap(), root.join("linked")).unwrap();
+
+        let walked = files(&root, 2);
+        assert!(walked.contains(&inside));
+        assert!(
+            !walked
+                .iter()
+                .any(|path| path.starts_with(root.join("linked")))
+        );
     }
 
     #[test]
