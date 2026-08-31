@@ -211,6 +211,11 @@ fn window(
     (&messages[start..end], start > 0)
 }
 
+fn etag(version: &str, before: Option<u64>, limit: usize) -> String {
+    let anchor = before.map_or_else(|| "tail".to_string(), |before| before.to_string());
+    format!("\"{version}-{anchor}-{limit}\"")
+}
+
 fn card(message: &transcript::Message) -> Card {
     Card {
         seq: message.seq,
@@ -342,8 +347,7 @@ async fn transcript_route(
     // The window is part of the identity: an ETag that named only the file's
     // length would let a `before=` page answer 304 for content the phone has
     // never held.
-    let anchor = before.map_or_else(|| "tail".to_string(), |before| before.to_string());
-    let etag = format!("\"{version}-{anchor}-{limit}\"");
+    let etag = etag(&version, before, limit);
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -946,6 +950,17 @@ mod tests {
     }
 
     #[test]
+    fn etags_distinguish_tail_cursor_and_limit() {
+        let tail = etag("version", None, 30);
+        let earlier = etag("version", Some(42), 30);
+        let wider = etag("version", None, 60);
+
+        assert_eq!(tail, "\"version-tail-30\"");
+        assert_eq!(earlier, "\"version-42-30\"");
+        assert_eq!(wider, "\"version-tail-60\"");
+    }
+
+    #[test]
     fn a_user_card_carries_escaped_text_and_an_agent_card_carries_html() {
         let user = card(&herdr_remote::transcript::Message {
             seq: 0,
@@ -981,6 +996,33 @@ mod tests {
         );
         // Re-opening the pane already held is not a transition.
         assert_eq!(superseded(&Some("w1:p1".into()), "w1:p1"), None);
+    }
+
+    #[tokio::test]
+    async fn opening_a_second_pane_unzooms_the_first_before_zooming_the_second() {
+        let reply = b"{\"id\":\"herdr-remote\",\"result\":{}}\n";
+        let (socket, mut requests) = herdr::fake_herdr(vec![reply, reply]);
+        let _socket = herdr::use_test_socket(socket);
+        let state = AppState::default();
+        *state.zoomed.0.lock().await = Some("w1:p1".into());
+
+        assert_eq!(
+            open(State(state), Path("w1:p2".into())).await,
+            Ok(StatusCode::NO_CONTENT)
+        );
+
+        let first = requests.recv().await.unwrap();
+        let second = requests.recv().await.unwrap();
+        assert_eq!(first["method"], "pane.zoom");
+        assert_eq!(
+            first["params"],
+            serde_json::json!({ "pane_id": "w1:p1", "zoomed": false })
+        );
+        assert_eq!(second["method"], "pane.zoom");
+        assert_eq!(
+            second["params"],
+            serde_json::json!({ "pane_id": "w1:p2", "zoomed": true })
+        );
     }
 
     #[test]

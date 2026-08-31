@@ -17,7 +17,29 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// A stalled peer must not be able to grow the read buffer without bound.
 const MAX_FRAME: u64 = 4 << 20;
 
+#[cfg(test)]
+static TEST_SOCKET_PATH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) struct TestSocketPath(Option<String>);
+
+#[cfg(test)]
+impl Drop for TestSocketPath {
+    fn drop(&mut self) {
+        *TEST_SOCKET_PATH.lock().unwrap() = self.0.take();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn use_test_socket(path: String) -> TestSocketPath {
+    TestSocketPath(TEST_SOCKET_PATH.lock().unwrap().replace(path))
+}
+
 fn socket_path() -> String {
+    #[cfg(test)]
+    if let Some(path) = TEST_SOCKET_PATH.lock().unwrap().clone() {
+        return path;
+    }
     std::env::var("HERDR_SOCKET_PATH").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_default();
         format!("{home}/.config/herdr/herdr.sock")
@@ -319,6 +341,38 @@ pub async fn prompt(pane_id: &str, text: &str) -> Result<Option<()>> {
 }
 
 #[cfg(test)]
+pub(crate) fn fake_herdr(
+    replies: Vec<&'static [u8]>,
+) -> (String, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::net::UnixListener;
+
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "herdr-remote-recording-test-{}-{n}.sock",
+        std::process::id()
+    ));
+    let path = path.to_str().unwrap().to_string();
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    let socket = path.clone();
+    let (sent, received) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        for reply in replies {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut connection = BufReader::new(stream);
+            let mut request = String::new();
+            connection.read_line(&mut request).await.unwrap();
+            let _ = sent.send(serde_json::from_str(&request).unwrap());
+            connection.get_mut().write_all(reply).await.unwrap();
+        }
+        let _ = std::fs::remove_file(&socket);
+    });
+    (path, received)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -352,28 +406,10 @@ mod tests {
         .unwrap()
     }
 
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use tokio::net::UnixListener;
-
     /// A herdr that accepts one connection, reads the request, replies with
     /// fixed bytes, hangs up, and removes its socket.
     fn fake_herdr(reply: &'static [u8]) -> String {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("herdr-remote-test-{}-{n}.sock", std::process::id()));
-        let path = path.to_str().unwrap().to_string();
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
-        let socket = path.clone();
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            let _ = stream.read(&mut request).await;
-            stream.write_all(reply).await.unwrap();
-            drop(stream);
-            let _ = std::fs::remove_file(&socket);
-        });
+        let (path, _) = super::fake_herdr(vec![reply]);
         path
     }
 
