@@ -33,6 +33,25 @@ export const append = (existing: Card[], incoming: Card[]): Card[] =>
 export const prepend = (older: Card[], existing: Card[]): Card[] =>
 	merge(existing, older);
 
+/** A newest-window response is authoritative from its first sequence onward.
+ * Keep pages already loaded before that boundary and replace everything newer;
+ * an empty response means the transcript itself is empty. */
+export function replaceTail(existing: Card[], incoming: Card[]): Card[] {
+	if (incoming.length === 0) return existing.length === 0 ? existing : [];
+	const start = incoming[0].seq;
+	const replaced = [
+		...existing.filter((card) => card.seq < start),
+		...incoming,
+	];
+	const unchanged =
+		replaced.length === existing.length &&
+		replaced.every(
+			(card, index) =>
+				card.seq === existing[index].seq && same(card, existing[index]),
+		);
+	return unchanged ? existing : replaced;
+}
+
 /** The agent's half is markdown the server rendered; the user's half is text
  *  the server escaped. Both arrive as HTML, and only the user's needs the
  *  whitespace of what they actually typed. */

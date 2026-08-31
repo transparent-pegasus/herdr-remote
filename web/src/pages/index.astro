@@ -160,11 +160,11 @@
       } from "../lib/api";
       import { href, parseRoute, type Route } from "../lib/route";
       import {
-        append,
         type Card,
         following,
         modalContent,
         prepend,
+        replaceTail,
       } from "../lib/transcript";
 
       const listEl = document.querySelector<HTMLDivElement>("#list")!;
@@ -441,7 +441,7 @@
           transcriptEl.hidden = false;
           logEl.hidden = true;
           if (page !== "unchanged") {
-            cards = append(cards, page.messages);
+            cards = replaceTail(cards, page.messages);
             paintCards();
             moreEl.hidden = !page.has_more;
           }
@@ -450,6 +450,7 @@
 
         // Raw output: an agent pane keeps the visible screen, whose redraw history
         // does not churn, and a shell keeps its scrollback.
+        cards = [];
         transcriptEl.hidden = true;
         logEl.hidden = false;
         const output = await fetchOutput(

@@ -5,6 +5,7 @@ import {
 	following,
 	modalContent,
 	prepend,
+	replaceTail,
 } from "./transcript";
 
 const card = (seq: number, role: Card["role"] = "assistant"): Card => ({
@@ -19,10 +20,9 @@ test("append adds only messages the list does not already carry", () => {
 	expect(merged.map((c) => c.seq)).toEqual([1, 2, 3]);
 });
 
-test("append returns the same array when the poll changed nothing", () => {
+test("append returns the same array when an overlapping poll changed nothing", () => {
 	const existing = [card(1), card(2)];
 	expect(append(existing, [card(1), card(2)])).toBe(existing);
-	expect(append(existing, [])).toBe(existing);
 });
 
 test("append keeps the newer copy of a message that was rewritten", () => {
@@ -31,6 +31,26 @@ test("append keeps the newer copy of a message that was rewritten", () => {
 	const merged = append(existing, [rewritten]);
 	expect(merged).not.toBe(existing);
 	expect(merged[1].preview).toBe("edited");
+});
+
+test("replaceTail treats an empty newest window as an empty transcript", () => {
+	expect(replaceTail([card(1), card(2)], [])).toEqual([]);
+});
+
+test("replaceTail replaces the overlapping tail and keeps loaded history", () => {
+	const existing = [card(1), card(2), card(3)];
+	const rewritten = { ...card(2), preview: "edited" };
+	const replaced = replaceTail(existing, [rewritten, card(3), card(4)]);
+	expect(replaced.map((c) => c.seq)).toEqual([1, 2, 3, 4]);
+	expect(replaced[1].preview).toBe("edited");
+});
+
+test("replaceTail keeps loaded history when the newest window starts after a gap", () => {
+	expect(
+		replaceTail([card(1), card(2), card(3)], [card(30), card(31)]).map(
+			(c) => c.seq,
+		),
+	).toEqual([1, 2, 3, 30, 31]);
 });
 
 test("prepend puts older messages in front, without duplicating the overlap", () => {
