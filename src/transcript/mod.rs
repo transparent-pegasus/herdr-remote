@@ -5,6 +5,7 @@
 mod preamble;
 mod claude;
 mod codex;
+mod grok;
 
 use serde::Serialize;
 
