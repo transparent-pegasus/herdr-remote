@@ -3,6 +3,7 @@
 //! place its finished answers still exist.
 
 mod preamble;
+mod claude;
 
 use serde::Serialize;
 
