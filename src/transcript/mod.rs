@@ -282,23 +282,22 @@ fn cursor_store(
     home: &Path,
 ) -> Option<PathBuf> {
     let chats = home.join(".cursor/chats");
-    let floor = session
-        .and_then(|id| {
-            files(&chats, 2)
-                .into_iter()
-                .find(|path| {
-                    path.file_name().and_then(|n| n.to_str()) == Some("meta.json")
-                        && path
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .and_then(|n| n.to_str())
-                            == Some(id)
-                })
-                .and_then(|path| path.parent().map(Path::to_path_buf))
-        })
-        .and_then(|dir| cursor_meta(&dir))
-        .and_then(|meta| meta.get("createdAtMs").and_then(|v| v.as_u64()))
-        .unwrap_or_default();
+    let floor = match session {
+        Some(id) => files(&chats, 2)
+            .into_iter()
+            .find(|path| {
+                path.file_name().and_then(|n| n.to_str()) == Some("meta.json")
+                    && path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        == Some(id)
+            })
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .and_then(|dir| cursor_meta(&dir))
+            .and_then(|meta| meta.get("createdAtMs").and_then(|v| v.as_u64()))?,
+        None => 0,
+    };
 
     let mut best: Option<(bool, u64, PathBuf)> = None;
     for project in std::fs::read_dir(&chats).ok()?.flatten() {
@@ -322,8 +321,12 @@ fn cursor_store(
             if updated < floor {
                 continue;
             }
+            let store = dir.join("store.db");
+            if !store.is_file() {
+                continue;
+            }
             let titled = title.is_some() && meta.get("title").and_then(|v| v.as_str()) == title;
-            let candidate = (titled, updated, dir.join("store.db"));
+            let candidate = (titled, updated, store);
             if best.as_ref().is_none_or(|seen| candidate > *seen) {
                 best = Some(candidate);
             }
@@ -511,8 +514,8 @@ mod resolution_tests {
         let source = resolve(
             &PaneRef {
                 agent: "cursor",
-                session_kind: Some("id"),
-                session_value: Some("an-id-that-addresses-nothing"),
+                session_kind: None,
+                session_value: None,
                 cwd: "/repo",
                 title: Some("Review Steering Digest"),
             },
@@ -522,6 +525,55 @@ mod resolution_tests {
         match source {
             Source::CursorDb { path } => {
                 assert!(path.to_string_lossy().contains("older"), "{path:?}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reported_cursor_id_without_readable_meta_fails_closed() {
+        for meta in [None, Some("not json")] {
+            let home = scratch();
+            let candidate = home.join(".cursor/chats/p1/candidate");
+            touch(&candidate.join("store.db"));
+            std::fs::write(
+                candidate.join("meta.json"),
+                serde_json::json!({ "cwd": "/repo", "hasConversation": true,
+                                    "updatedAtMs": 100u64 })
+                .to_string(),
+            )
+            .unwrap();
+            if let Some(meta) = meta {
+                let reported = home.join(".cursor/chats/p1/reported");
+                std::fs::create_dir_all(&reported).unwrap();
+                std::fs::write(reported.join("meta.json"), meta).unwrap();
+            }
+
+            assert!(resolve(&pane("cursor", Some("reported"), "/repo"), &home).is_none());
+        }
+    }
+
+    #[test]
+    fn cursor_skips_a_ranked_candidate_without_a_store() {
+        let home = scratch();
+        for (name, updated, store) in [("missing", 99_u64, false), ("real", 10, true)] {
+            let dir = home.join(".cursor/chats/p1").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            if store {
+                touch(&dir.join("store.db"));
+            }
+            std::fs::write(
+                dir.join("meta.json"),
+                serde_json::json!({ "cwd": "/repo", "hasConversation": true,
+                                    "updatedAtMs": updated })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        match resolve(&pane("cursor", None, "/repo"), &home).unwrap() {
+            Source::CursorDb { path } => {
+                assert!(path.to_string_lossy().contains("/real/"), "{path:?}")
             }
             other => panic!("{other:?}"),
         }
