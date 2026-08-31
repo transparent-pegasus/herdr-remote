@@ -2,11 +2,11 @@
 //! running on the alternate screen keeps no scrollback, so the file is the only
 //! place its finished answers still exist.
 
-mod preamble;
 mod claude;
 mod codex;
-mod grok;
 mod cursor;
+mod grok;
+mod preamble;
 
 use serde::Serialize;
 
