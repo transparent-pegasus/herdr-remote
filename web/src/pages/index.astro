@@ -31,6 +31,11 @@
     <p id="status" role="status"></p>
     <div id="list"></div>
     <button id="more" type="button" hidden>Load earlier output</button>
+    <ol id="transcript" hidden></ol>
+    <dialog id="full">
+      <div class="body"></div>
+      <form method="dialog"><button>Close</button></form>
+    </dialog>
     <pre id="log" hidden></pre>
 
     <form id="composer">
@@ -112,10 +117,16 @@
 
     <script>
       import {
+        closePane,
+        fetchLive,
         fetchOutput,
         fetchSession,
+        fetchTranscript,
+        forgetPane,
         isTransient,
         interruptPane,
+        type Live,
+        openPane,
         paneSubtitle,
         pressArrow,
         pressEnter,
@@ -129,6 +140,13 @@
         type Workspace,
       } from "../lib/api";
       import { href, parseRoute, type Route } from "../lib/route";
+      import {
+        append,
+        type Card,
+        following,
+        modalContent,
+        prepend,
+      } from "../lib/transcript";
 
       const listEl = document.querySelector<HTMLDivElement>("#list")!;
       const logEl = document.querySelector<HTMLPreElement>("#log")!;
@@ -148,6 +166,62 @@
       const upEl = document.querySelector<HTMLButtonElement>("#up")!;
       const downEl = document.querySelector<HTMLButtonElement>("#down")!;
       const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
+      const transcriptEl =
+        document.querySelector<HTMLOListElement>("#transcript")!;
+      const fullEl = document.querySelector<HTMLDialogElement>("#full")!;
+      const fullBodyEl = fullEl.querySelector<HTMLDivElement>(".body")!;
+
+      let cards: Card[] = [];
+      let paintedCards: Card[] = [];
+
+      function cardEl(card: Card) {
+        const item = document.createElement("li");
+        item.dataset.role = card.role;
+        item.dataset.seq = String(card.seq);
+        const preview = document.createElement("p");
+        preview.className = "preview";
+        // textContent: a preview is the speaker's words, not our markup.
+        preview.textContent = card.preview;
+        item.append(preview);
+        return item;
+      }
+
+      /** Rebuild only when the merge produced a different array. Thirty nodes is
+       *  cheap; yanking the reader's scroll position every three seconds is not. */
+      function paintCards() {
+        if (cards === paintedCards) return;
+        const follow = following(
+          transcriptEl.scrollTop,
+          transcriptEl.clientHeight,
+          transcriptEl.scrollHeight,
+        );
+        const top = transcriptEl.scrollTop;
+        transcriptEl.replaceChildren(...cards.map(cardEl));
+        paintedCards = cards;
+        transcriptEl.scrollTop = follow ? transcriptEl.scrollHeight : top;
+      }
+
+      // The agent's HTML was rendered by the server, which escapes raw HTML and
+      // strips dangerous link and image schemes; the user's own text arrives escaped
+      // by the same server, so both are safe to assign and neither is re-escaped.
+      function openCard(card: Card) {
+        const { wrap, html } = modalContent(card);
+        fullBodyEl.classList.toggle("wrap", wrap);
+        fullBodyEl.innerHTML = html;
+        fullEl.showModal();
+      }
+
+      transcriptEl.addEventListener("click", (event) => {
+        const item = (event.target as Element | null)?.closest("li");
+        const seq = Number(item?.dataset.seq);
+        const card = cards.find((candidate) => candidate.seq === seq);
+        if (card) openCard(card);
+      });
+
+      // The dialog element itself is the backdrop, so a tap outside the panel closes.
+      fullEl.addEventListener("click", (event) => {
+        if (event.target === fullEl) fullEl.close();
+      });
 
       const POLL_MS = 3000;
       /** The session is smaller and changes slower than pane output. */
@@ -583,6 +657,63 @@
       #status.error {
         color: inherit;
         font-weight: 600;
+      }
+      #transcript {
+        flex: 1;
+        list-style: none;
+        margin: 0;
+        padding: 0 0 0.5rem;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      /* Older WebViews do not mark the UA `[hidden]` rule `!important`, so a
+         `display` of our own would win over it — the same reason `#log[hidden]`
+         already exists below. */
+      #transcript[hidden],
+      #live[hidden] {
+        display: none;
+      }
+      #transcript li {
+        border-radius: 10px;
+        padding: 0.5rem 0.7rem;
+        cursor: pointer;
+      }
+      #transcript li[data-role="user"] {
+        margin-left: 15%;
+        background: var(--accent-soft, #26323d);
+      }
+      #transcript li[data-role="assistant"] {
+        background: var(--panel, #1c1c1c);
+      }
+      /* Plain text in one node, which is what lets the clamp cut at three lines and
+         append its ellipsis; markup would give it block children to trip on. */
+      .preview {
+        margin: 0;
+        line-height: 1.6;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
+        overflow: hidden;
+      }
+      #full {
+        max-width: min(46rem, 92vw);
+        max-height: 82vh;
+        overflow: auto;
+        border: none;
+        border-radius: 12px;
+      }
+      #full .body.wrap {
+        white-space: pre-wrap;
+        font-family: ui-monospace, monospace;
+      }
+      #full .body pre,
+      #full .body table {
+        display: block;
+        overflow-x: auto;
       }
       /* The list and the log scroll; the composer keeps its own space in the
          column, so neither can end up underneath it. */
