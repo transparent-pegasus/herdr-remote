@@ -286,6 +286,35 @@ async fn transcript_route(
     Ok(([(header::ETAG, etag)], Json(page)).into_response())
 }
 
+#[derive(Serialize)]
+struct LiveView {
+    screen: String,
+    composer: String,
+}
+
+/// The whole visible screen, not a cropped region: a picker is drawn wherever
+/// the agent likes, the pane's status stays `idle` while one is open, and a
+/// zoomed screen measured 1,393 bytes. `MAX_OUTPUT_LINES` is the same ceiling
+/// the raw-output route uses, and no measured screen approaches it.
+async fn live_route(Path(pane_id): Path<String>) -> ApiResult<Json<LiveView>> {
+    let context = herdr::pane_context(&pane_id)
+        .await
+        .map_err(failed("could not read the herdr session"))?
+        .ok_or((StatusCode::NOT_FOUND, "no such pane"))?;
+    let output = herdr::read(&pane_id, MAX_OUTPUT_LINES, "visible")
+        .await
+        .map_err(failed("could not read the pane"))?;
+    let composer = context
+        .agent
+        .as_deref()
+        .and_then(|agent| live::composer(agent, &output.text))
+        .unwrap_or_default();
+    Ok(Json(LiveView {
+        screen: output.text,
+        composer,
+    }))
+}
+
 // --- Host allowlist ---------------------------------------------------------
 //
 // Cloudflare Access guards the tunnel, not this socket. A browser tricked by
@@ -453,6 +482,7 @@ fn app(allowed: Allowed) -> Router {
         .route("/panes/{pane_id}/down", post(down))
         .route("/panes/{pane_id}/output", get(output))
         .route("/panes/{pane_id}/transcript", get(transcript_route))
+        .route("/panes/{pane_id}/live", get(live_route))
         // Unknown paths claimed by the nest stay API responses.
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::map_response(no_store))
@@ -563,6 +593,17 @@ mod tests {
             text: "**hi**".into(),
         });
         assert!(agent.html.contains("<strong>hi</strong>"));
+    }
+
+    #[test]
+    fn the_live_view_names_its_fields_the_way_the_phone_reads_them() {
+        let json = serde_json::to_value(LiveView {
+            screen: "❯ draft".into(),
+            composer: "draft".into(),
+        })
+        .unwrap();
+        assert_eq!(json["screen"], "❯ draft");
+        assert_eq!(json["composer"], "draft");
     }
 
     #[test]
