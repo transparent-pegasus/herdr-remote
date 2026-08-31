@@ -20,11 +20,18 @@ type ApiResult<T> = Result<T, (StatusCode, &'static str)>;
 /// a pane that starts a new session does not keep serving the old one.
 type Cache = Arc<Mutex<HashMap<String, (transcript::Source, Transcript)>>>;
 
+/// The single pane this server has zoomed. A `tokio` mutex, because the
+/// transition awaits herdr while holding it: two concurrent opens must not
+/// trade the slot between each other's zoom calls.
+#[derive(Clone, Default)]
+struct Zoomed(Arc<tokio::sync::Mutex<Option<String>>>);
+
 /// Axum carries one router state, so the two things handlers need travel
 /// together rather than as two `with_state` calls that cannot both exist.
 #[derive(Clone, Default)]
 struct AppState {
     transcripts: Cache,
+    zoomed: Zoomed,
 }
 
 #[derive(Serialize)]
@@ -315,6 +322,45 @@ async fn live_route(Path(pane_id): Path<String>) -> ApiResult<Json<LiveView>> {
     }))
 }
 
+/// The pane that must be released before `pane_id` can take the slot.
+fn superseded(slot: &Option<String>, pane_id: &str) -> Option<String> {
+    slot.clone().filter(|held| held != pane_id)
+}
+
+async fn open(State(state): State<AppState>, Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
+    let mut slot = state.zoomed.0.lock().await;
+    if let Some(previous) = superseded(&slot, &pane_id) {
+        // herdr keeps one zoom per tab, so zooming the new pane moves the zoom
+        // anyway; a failure here is worth reporting and not worth refusing the
+        // pane the phone actually asked for.
+        if let Err(error) = herdr::zoom(&previous, false).await {
+            eprintln!("could not unzoom {previous}: {error:#}");
+        }
+    }
+    herdr::zoom(&pane_id, true)
+        .await
+        .map_err(failed("could not zoom the pane"))?;
+    *slot = Some(pane_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn close(
+    State(state): State<AppState>,
+    Path(pane_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let mut slot = state.zoomed.0.lock().await;
+    if slot.as_deref() != Some(pane_id.as_str()) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    herdr::zoom(&pane_id, false)
+        .await
+        .map_err(failed("could not unzoom the pane"))?;
+    // Only after the pane is actually back: a slot cleared on a failed unzoom
+    // would leave a zoomed pane that no later `open` knows to release.
+    *slot = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // --- Host allowlist ---------------------------------------------------------
 //
 // Cloudflare Access guards the tunnel, not this socket. A browser tricked by
@@ -483,6 +529,8 @@ fn app(allowed: Allowed) -> Router {
         .route("/panes/{pane_id}/output", get(output))
         .route("/panes/{pane_id}/transcript", get(transcript_route))
         .route("/panes/{pane_id}/live", get(live_route))
+        .route("/panes/{pane_id}/open", post(open))
+        .route("/panes/{pane_id}/close", post(close))
         // Unknown paths claimed by the nest stay API responses.
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::map_response(no_store))
@@ -604,6 +652,17 @@ mod tests {
         .unwrap();
         assert_eq!(json["screen"], "❯ draft");
         assert_eq!(json["composer"], "draft");
+    }
+
+    #[test]
+    fn opening_a_second_pane_supersedes_the_first() {
+        assert_eq!(superseded(&None, "w1:p1"), None);
+        assert_eq!(
+            superseded(&Some("w1:p1".into()), "w1:p2"),
+            Some("w1:p1".into())
+        );
+        // Re-opening the pane already held is not a transition.
+        assert_eq!(superseded(&Some("w1:p1".into()), "w1:p1"), None);
     }
 
     #[test]
