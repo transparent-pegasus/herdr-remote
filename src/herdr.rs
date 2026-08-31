@@ -94,6 +94,16 @@ struct TabInfo {
     label: String,
 }
 
+/// What an agent reported about its own session. Self-reported, hence the
+/// boundary in `transcript::guard`.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct AgentSession {
+    pub source: String,
+    pub agent: String,
+    pub kind: String,
+    pub value: String,
+}
+
 #[derive(Deserialize)]
 struct PaneInfo {
     pane_id: String,
@@ -103,6 +113,8 @@ struct PaneInfo {
     label: Option<String>,
     title: Option<String>,
     terminal_title_stripped: Option<String>,
+    agent_session: Option<AgentSession>,
+    cwd: Option<String>,
 }
 
 // --- what we expose, so a herdr schema change need not reach the phone ---
@@ -194,6 +206,40 @@ async fn snapshot() -> Result<Snapshot> {
 
 pub async fn session() -> Result<Session> {
     Ok(to_session(snapshot().await?))
+}
+
+/// What the transcript layer needs to find this pane's session file. `title`
+/// prefers the stripped terminal title, which is what cursor's own chat titles
+/// are matched against.
+pub struct PaneContext {
+    pub agent: Option<String>,
+    pub session: Option<AgentSession>,
+    pub cwd: String,
+    pub title: Option<String>,
+}
+
+pub async fn pane_context(pane_id: &str) -> Result<Option<PaneContext>> {
+    Ok(snapshot()
+        .await?
+        .panes
+        .into_iter()
+        .find(|pane| pane.pane_id == pane_id)
+        .map(|pane| PaneContext {
+            agent: pane.agent.clone(),
+            session: pane.agent_session.clone(),
+            cwd: pane.cwd.clone().unwrap_or_default(),
+            title: pane
+                .terminal_title_stripped
+                .clone()
+                .or_else(|| pane.title.clone()),
+        }))
+}
+
+/// A pane rendered into twenty columns destroys anything it draws; zooming is
+/// what makes a picker readable from the phone.
+pub async fn zoom(pane_id: &str, on: bool) -> Result<()> {
+    call("pane.zoom", json!({ "pane_id": pane_id, "zoomed": on })).await?;
+    Ok(())
 }
 
 /// `truncated` means herdr had more scrollback than `lines` asked for, which is
@@ -379,6 +425,48 @@ mod tests {
         let path = fake_herdr(b"{\"id\":\"herdr-remote\"}\n");
         let error = probe(&path).await.unwrap_err();
         assert!(error.to_string().contains("herdr ping returned no result"));
+    }
+
+    #[test]
+    fn a_pane_carries_its_session_and_cwd() {
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "workspaces": [], "tabs": [],
+            "panes": [{
+                "pane_id": "w1:p1", "tab_id": "w1:t1", "agent": "claude",
+                "agent_status": "working", "cwd": "/repo",
+                "title": "raw", "terminal_title_stripped": "stripped",
+                "agent_session": { "source": "herdr:claude", "agent": "claude",
+                                   "kind": "id", "value": "abc" }
+            }]
+        }))
+        .unwrap();
+        let pane = &snapshot.panes[0];
+        assert_eq!(pane.cwd.as_deref(), Some("/repo"));
+        let session = pane.agent_session.clone().unwrap();
+        assert_eq!(
+            session,
+            AgentSession {
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                kind: "id".into(),
+                value: "abc".into(),
+            }
+        );
+    }
+
+    /// Most panes report no session at all — measured with four agents running
+    /// in one tab, grok reported none and codex reported none until it had
+    /// taken a turn — so the field must stay optional all the way through.
+    #[test]
+    fn a_pane_without_a_session_still_parses() {
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "workspaces": [], "tabs": [],
+            "panes": [{ "pane_id": "w1:p2", "tab_id": "w1:t1",
+                        "agent": "grok", "agent_status": "idle" }]
+        }))
+        .unwrap();
+        assert!(snapshot.panes[0].agent_session.is_none());
+        assert!(snapshot.panes[0].cwd.is_none());
     }
 
     #[test]

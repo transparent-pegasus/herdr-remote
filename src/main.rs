@@ -1,16 +1,58 @@
 mod herdr;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing::get, routing::post};
-use serde::Deserialize;
+use herdr_remote::transcript::{self, Transcript};
+use herdr_remote::{live, markdown};
+use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
 type ApiResult<T> = Result<T, (StatusCode, &'static str)>;
+
+/// One parsed transcript per pane, keyed with the source it was parsed from so
+/// a pane that starts a new session does not keep serving the old one.
+type Cache = Arc<Mutex<HashMap<String, (transcript::Source, Transcript)>>>;
+
+/// The single pane this server has zoomed. A `tokio` mutex, because the
+/// transition awaits herdr while holding it: two concurrent opens must not
+/// trade the slot between each other's zoom calls.
+#[derive(Clone, Default)]
+struct Zoomed(Arc<tokio::sync::Mutex<Option<String>>>);
+
+/// Axum carries one router state, so the two things handlers need travel
+/// together rather than as two `with_state` calls that cannot both exist.
+#[derive(Clone, Default)]
+struct AppState {
+    transcripts: Cache,
+    zoomed: Zoomed,
+}
+
+#[derive(Serialize)]
+struct Card {
+    seq: u64,
+    role: transcript::Role,
+    preview: String,
+    html: String,
+}
+
+#[derive(Serialize)]
+struct TranscriptPage {
+    messages: Vec<Card>,
+    has_more: bool,
+}
+
+#[derive(Deserialize)]
+struct TranscriptWindow {
+    before: Option<u64>,
+    limit: Option<usize>,
+}
 
 /// Detail goes to the operator's terminal, not to the client: the context
 /// chain carries the herdr socket path.
@@ -104,7 +146,10 @@ enum Source {
 impl Source {
     fn as_herdr(self) -> &'static str {
         match self {
-            Source::Scrollback => "recent",
+            // `recent` hands back rows already broken at the pane's width, so a
+            // narrow pane's output arrives pre-wrapped and unreadable on a
+            // phone; the unwrapped source joins the soft wraps back up.
+            Source::Scrollback => "recent_unwrapped",
             Source::Screen => "visible",
         }
     }
@@ -126,6 +171,194 @@ async fn output(
         .await
         .map_err(failed("could not read the pane"))?;
     Ok(([("x-truncated", output.truncated.to_string())], output.text))
+}
+
+/// The newest `limit` messages, or the `limit` messages whose `seq` is strictly
+/// below `before`. `has_more` says whether anything older remains.
+fn window(
+    messages: &[transcript::Message],
+    before: Option<u64>,
+    limit: usize,
+) -> (&[transcript::Message], bool) {
+    let end = match before {
+        Some(before) => messages.partition_point(|message| message.seq < before),
+        None => messages.len(),
+    };
+    let start = end.saturating_sub(limit);
+    (&messages[start..end], start > 0)
+}
+
+fn card(message: &transcript::Message) -> Card {
+    Card {
+        seq: message.seq,
+        role: message.role,
+        preview: markdown::preview(&message.text, 300),
+        html: match message.role {
+            transcript::Role::Assistant => markdown::to_html(&message.text),
+            // The user's own words are not markup, and reach the phone through
+            // the same field, so they arrive as HTML that means what they typed.
+            transcript::Role::User => markdown::escape(&message.text),
+        },
+    }
+}
+
+/// Parsing a cold transcript — forty-four megabytes at the extreme — reading
+/// SQLite, and rendering markdown are all synchronous. `None` means the source
+/// stopped being readable, which is the raw-output fallback rather than an
+/// error.
+fn take_window(
+    cache: Cache,
+    key: String,
+    source: transcript::Source,
+    before: Option<u64>,
+    limit: usize,
+) -> Option<(String, Vec<transcript::Message>, bool)> {
+    let mut map = cache.lock().ok()?;
+    let stale = map.get(&key).is_none_or(|(cached, _)| *cached != source);
+    if stale {
+        map.insert(key.clone(), (source.clone(), Transcript::open(source)));
+    }
+    let (_, transcript) = map.get_mut(&key)?;
+    if transcript.refresh().is_err() {
+        // The file went away, or the store is damaged. Half a history is worse
+        // than none: drop it and let the pane fall back.
+        map.remove(&key);
+        return None;
+    }
+    let version = transcript.version();
+    let (messages, has_more) = window(transcript.messages(), before, limit);
+    Some((version, messages.to_vec(), has_more))
+}
+
+/// A pane with no resolvable transcript answers 404: the phone reads that as
+/// "use the raw output view", not as a fault.
+async fn transcript_route(
+    State(state): State<AppState>,
+    Path(pane_id): Path<String>,
+    Query(query): Query<TranscriptWindow>,
+    headers: header::HeaderMap,
+) -> ApiResult<Response> {
+    let context = herdr::pane_context(&pane_id)
+        .await
+        .map_err(failed("could not read the herdr session"))?
+        .ok_or((StatusCode::NOT_FOUND, "no such pane"))?;
+    let home = transcript::home();
+    let session = context.session.as_ref();
+    let source = transcript::resolve(
+        &transcript::PaneRef {
+            agent: context.agent.as_deref().unwrap_or_default(),
+            session_kind: session.map(|session| session.kind.as_str()),
+            session_value: session.map(|session| session.value.as_str()),
+            cwd: &context.cwd,
+            title: context.title.as_deref(),
+        },
+        &home,
+    )
+    .ok_or((StatusCode::NOT_FOUND, "no transcript for this pane"))?;
+
+    let limit = query.limit.unwrap_or(30).clamp(1, 200);
+    let before = query.before;
+    let cache = state.transcripts.clone();
+    let key = pane_id.clone();
+    let taken = tokio::task::spawn_blocking(move || take_window(cache, key, source, before, limit))
+        .await
+        .map_err(|error| {
+            eprintln!("transcript task failed: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read the transcript",
+            )
+        })?;
+    let Some((version, messages, has_more)) = taken else {
+        return Err((StatusCode::NOT_FOUND, "no transcript for this pane"));
+    };
+
+    // The window is part of the identity: an ETag that named only the file's
+    // length would let a `before=` page answer 304 for content the phone has
+    // never held.
+    let anchor = before.map_or_else(|| "tail".to_string(), |before| before.to_string());
+    let etag = format!("\"{version}-{anchor}-{limit}\"");
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        == Some(etag.as_str())
+    {
+        return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
+    }
+
+    let page = TranscriptPage {
+        messages: messages.iter().map(card).collect(),
+        has_more,
+    };
+    Ok(([(header::ETAG, etag)], Json(page)).into_response())
+}
+
+#[derive(Serialize)]
+struct LiveView {
+    screen: String,
+    composer: String,
+}
+
+/// The whole visible screen, not a cropped region: a picker is drawn wherever
+/// the agent likes, the pane's status stays `idle` while one is open, and a
+/// zoomed screen measured 1,393 bytes. `MAX_OUTPUT_LINES` is the same ceiling
+/// the raw-output route uses, and no measured screen approaches it.
+async fn live_route(Path(pane_id): Path<String>) -> ApiResult<Json<LiveView>> {
+    let context = herdr::pane_context(&pane_id)
+        .await
+        .map_err(failed("could not read the herdr session"))?
+        .ok_or((StatusCode::NOT_FOUND, "no such pane"))?;
+    let output = herdr::read(&pane_id, MAX_OUTPUT_LINES, "visible")
+        .await
+        .map_err(failed("could not read the pane"))?;
+    let composer = context
+        .agent
+        .as_deref()
+        .and_then(|agent| live::composer(agent, &output.text))
+        .unwrap_or_default();
+    Ok(Json(LiveView {
+        screen: output.text,
+        composer,
+    }))
+}
+
+/// The pane that must be released before `pane_id` can take the slot.
+fn superseded(slot: &Option<String>, pane_id: &str) -> Option<String> {
+    slot.clone().filter(|held| held != pane_id)
+}
+
+async fn open(State(state): State<AppState>, Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
+    let mut slot = state.zoomed.0.lock().await;
+    if let Some(previous) = superseded(&slot, &pane_id) {
+        // herdr keeps one zoom per tab, so zooming the new pane moves the zoom
+        // anyway; a failure here is worth reporting and not worth refusing the
+        // pane the phone actually asked for.
+        if let Err(error) = herdr::zoom(&previous, false).await {
+            eprintln!("could not unzoom {previous}: {error:#}");
+        }
+    }
+    herdr::zoom(&pane_id, true)
+        .await
+        .map_err(failed("could not zoom the pane"))?;
+    *slot = Some(pane_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn close(
+    State(state): State<AppState>,
+    Path(pane_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let mut slot = state.zoomed.0.lock().await;
+    if slot.as_deref() != Some(pane_id.as_str()) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    herdr::zoom(&pane_id, false)
+        .await
+        .map_err(failed("could not unzoom the pane"))?;
+    // Only after the pane is actually back: a slot cleared on a failed unzoom
+    // would leave a zoomed pane that no later `open` knows to release.
+    *slot = None;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- Host allowlist ---------------------------------------------------------
@@ -294,9 +527,14 @@ fn app(allowed: Allowed) -> Router {
         .route("/panes/{pane_id}/up", post(up))
         .route("/panes/{pane_id}/down", post(down))
         .route("/panes/{pane_id}/output", get(output))
+        .route("/panes/{pane_id}/transcript", get(transcript_route))
+        .route("/panes/{pane_id}/live", get(live_route))
+        .route("/panes/{pane_id}/open", post(open))
+        .route("/panes/{pane_id}/close", post(close))
         // Unknown paths claimed by the nest stay API responses.
         .fallback(|| async { StatusCode::NOT_FOUND })
-        .layer(middleware::map_response(no_store));
+        .layer(middleware::map_response(no_store))
+        .with_state(AppState::default());
 
     // The UI routes on the path (/w/<workspace>/t/<tab>/p/<pane>), so a deep
     // link or a reload asks for a file that does not exist; hand back the app.
@@ -341,6 +579,91 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollback_asks_herdr_to_unwrap() {
+        assert_eq!(Source::Scrollback.as_herdr(), "recent_unwrapped");
+        assert_eq!(Source::Screen.as_herdr(), "visible");
+    }
+
+    fn messages(seqs: &[u64]) -> Vec<herdr_remote::transcript::Message> {
+        seqs.iter()
+            .map(|seq| herdr_remote::transcript::Message {
+                seq: *seq,
+                role: herdr_remote::transcript::Role::User,
+                text: format!("m{seq}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_cursor_returns_the_newest_window() {
+        let all = messages(&[0, 1, 2, 3, 4]);
+        let (page, has_more) = window(&all, None, 2);
+        assert_eq!(page.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![3, 4]);
+        assert!(has_more);
+    }
+
+    #[test]
+    fn a_cursor_is_exclusive_and_reaches_further_back() {
+        let all = messages(&[0, 1, 2, 3, 4]);
+        let (page, has_more) = window(&all, Some(3), 2);
+        assert_eq!(page.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(has_more);
+    }
+
+    #[test]
+    fn the_oldest_page_reports_nothing_more() {
+        let all = messages(&[0, 1, 2]);
+        let (page, has_more) = window(&all, Some(2), 30);
+        assert_eq!(page.len(), 2);
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn an_empty_transcript_is_an_empty_page_not_an_error() {
+        let (page, has_more) = window(&[], None, 30);
+        assert!(page.is_empty());
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn a_user_card_carries_escaped_text_and_an_agent_card_carries_html() {
+        let user = card(&herdr_remote::transcript::Message {
+            seq: 0,
+            role: herdr_remote::transcript::Role::User,
+            text: "<b>hi</b>".into(),
+        });
+        assert_eq!(user.html, "&lt;b&gt;hi&lt;/b&gt;");
+        let agent = card(&herdr_remote::transcript::Message {
+            seq: 1,
+            role: herdr_remote::transcript::Role::Assistant,
+            text: "**hi**".into(),
+        });
+        assert!(agent.html.contains("<strong>hi</strong>"));
+    }
+
+    #[test]
+    fn the_live_view_names_its_fields_the_way_the_phone_reads_them() {
+        let json = serde_json::to_value(LiveView {
+            screen: "❯ draft".into(),
+            composer: "draft".into(),
+        })
+        .unwrap();
+        assert_eq!(json["screen"], "❯ draft");
+        assert_eq!(json["composer"], "draft");
+    }
+
+    #[test]
+    fn opening_a_second_pane_supersedes_the_first() {
+        assert_eq!(superseded(&None, "w1:p1"), None);
+        assert_eq!(
+            superseded(&Some("w1:p1".into()), "w1:p2"),
+            Some("w1:p1".into())
+        );
+        // Re-opening the pane already held is not a transition.
+        assert_eq!(superseded(&Some("w1:p1".into()), "w1:p1"), None);
+    }
 
     #[test]
     fn bare_keys_reach_agents_only() {
