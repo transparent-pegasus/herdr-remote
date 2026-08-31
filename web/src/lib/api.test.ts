@@ -5,6 +5,7 @@ import {
 	type Pane,
 	paneSubtitle,
 	pressArrow,
+	stateIndicator,
 } from "./api";
 
 const session = {
@@ -36,6 +37,33 @@ const pane = (over: Partial<Pane> = {}): Pane => ({
 	agent: null,
 	state: "unknown",
 	...over,
+});
+
+test("each defined pane state has its specified indicator", () => {
+	expect(stateIndicator(["blocked"])).toBe("yellow");
+	expect(stateIndicator(["working"])).toBe("green");
+	expect(stateIndicator(["idle"])).toBe("gray");
+	expect(stateIndicator(["done"])).toBe("gray");
+	expect(stateIndicator(["unknown"])).toBe("transparent");
+});
+
+test("aggregate indicators use yellow, green, then gray priority", () => {
+	expect(stateIndicator(["idle", "working", "blocked"])).toBe("yellow");
+	expect(stateIndicator(["done", "working", "unknown"])).toBe("green");
+	expect(stateIndicator(["unknown", "idle", "done"])).toBe("gray");
+});
+
+test("aggregate priority is independent of pane order", () => {
+	expect(stateIndicator(["blocked", "working", "idle"])).toBe("yellow");
+	expect(stateIndicator(["idle", "working", "blocked"])).toBe("yellow");
+});
+
+test("an empty state collection is transparent", () => {
+	expect(stateIndicator([])).toBe("transparent");
+});
+
+test("an unrecognized state is transparent", () => {
+	expect(stateIndicator(["future-state"])).toBe("transparent");
 });
 
 test("session responses carry workspaces", async () => {

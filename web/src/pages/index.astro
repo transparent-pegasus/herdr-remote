@@ -96,8 +96,10 @@
         pressArrow,
         pressEnter,
         sendPrompt,
+        stateIndicator,
         type Pane,
         type Session,
+        type StateIndicator,
         type Tab,
         type Workspace,
       } from "../lib/api";
@@ -151,10 +153,24 @@
       }
 
       // textContent throughout: labels are terminal titles, not our markup.
-      function row(path: string, name: string, subtitle: string) {
+      const indicatorLabels: Record<StateIndicator, string> = {
+        transparent: "unknown",
+        gray: "idle or done",
+        green: "working",
+        yellow: "needs action",
+      };
+
+      function row(
+        path: string,
+        name: string,
+        subtitle: string,
+        indicator: StateIndicator,
+      ) {
         const link = document.createElement("a");
         link.href = path;
         link.className = "row";
+        link.dataset.indicator = indicator;
+        link.ariaLabel = `${name}, ${subtitle}, ${indicatorLabels[indicator]}`;
 
         const nameEl = document.createElement("span");
         nameEl.className = "name";
@@ -170,7 +186,14 @@
       function workspaceRow(workspace: Workspace) {
         const count =
           workspace.tabs.length === 1 ? "1 tab" : `${workspace.tabs.length} tabs`;
-        return row(href({ workspaceId: workspace.id }), workspace.label, count);
+        return row(
+          href({ workspaceId: workspace.id }),
+          workspace.label,
+          count,
+          stateIndicator(
+            workspace.tabs.flatMap((tab) => tab.panes.map((pane) => pane.state)),
+          ),
+        );
       }
 
       function tabRow(workspace: Workspace, tab: Tab) {
@@ -179,6 +202,7 @@
           href({ workspaceId: workspace.id, tabId: tab.id }),
           tab.label,
           count,
+          stateIndicator(tab.panes.map((pane) => pane.state)),
         );
       }
 
@@ -289,6 +313,7 @@
                     }),
                     candidate.label,
                     paneSubtitle(candidate),
+                    stateIndicator([candidate.state]),
                   ),
                 )
               : workspace
@@ -551,13 +576,34 @@
         overflow-wrap: anywhere;
       }
       .row {
+        position: relative;
         display: block;
         margin-bottom: 0.5rem;
-        padding: 0.75rem;
+        padding: 0.75rem 2rem 0.75rem 0.75rem;
         border: 1px solid var(--edge);
         border-radius: 0.5rem;
         color: inherit;
         text-decoration: none;
+      }
+      .row::after {
+        position: absolute;
+        top: 50%;
+        right: 0.75rem;
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        background: transparent;
+        content: "";
+        transform: translateY(-50%);
+      }
+      .row[data-indicator="gray"]::after {
+        background: #9ca3af;
+      }
+      .row[data-indicator="green"]::after {
+        background: #22c55e;
+      }
+      .row[data-indicator="yellow"]::after {
+        background: #eab308;
       }
       .name {
         display: block;

@@ -11,6 +11,23 @@ export type Workspace = { id: string; label: string; tabs: Tab[] };
 
 export type Session = { workspaces: Workspace[] };
 
+export type StateIndicator = "transparent" | "gray" | "green" | "yellow";
+
+export function stateIndicator(states: Iterable<string>): StateIndicator {
+	let indicator: StateIndicator = "transparent";
+	for (const state of states) {
+		if (state === "blocked") return "yellow";
+		if (state === "working") indicator = "green";
+		else if (
+			(state === "idle" || state === "done") &&
+			indicator === "transparent"
+		) {
+			indicator = "gray";
+		}
+	}
+	return indicator;
+}
+
 /** The server's error bodies are short and human-readable; show them. */
 async function reason(response: Response, fallback: string): Promise<string> {
 	const body = (await response.text().catch(() => "")).trim();
