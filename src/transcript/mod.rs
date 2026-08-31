@@ -43,3 +43,546 @@ mod tests {
         assert_eq!(json, r#"{"seq":3,"role":"assistant","text":"done"}"#);
     }
 }
+
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+/// What resolution needs from a pane, without depending on herdr's wire types.
+pub struct PaneRef<'a> {
+    pub agent: &'a str,
+    pub session_kind: Option<&'a str>,
+    pub session_value: Option<&'a str>,
+    pub cwd: &'a str,
+    pub title: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Claude,
+    Codex,
+    Grok,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// One JSON object per line, appended as the session runs.
+    Lines { path: PathBuf, format: Format },
+    /// A blob store with no byte offset to resume from.
+    CursorDb { path: PathBuf },
+}
+
+/// The operator's home, read once per call rather than captured, so tests can
+/// hand in a scratch tree instead of mutating the process environment.
+pub fn home() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
+/// What a transcript file for one agent is allowed to be called.
+type Shape = fn(&str) -> bool;
+
+/// Where each agent's transcript is allowed to be, and what it must be called.
+/// Pairing the root with the shape is what stops a reported path from naming an
+/// arbitrary file under someone else's root and having it read as this agent's
+/// history.
+fn allowed(agent: &str) -> Option<(&'static str, Shape)> {
+    match agent {
+        "claude" => Some((".claude/projects", |name| name.ends_with(".jsonl"))),
+        "codex" => Some((".codex/sessions", |name| name.ends_with(".jsonl"))),
+        "grok" => Some((".grok/sessions", |name| name == "chat_history.jsonl")),
+        "cursor" => Some((".cursor/chats", |name| name == "store.db")),
+        _ => None,
+    }
+}
+
+/// `agent_session` is self-reported, so a path arrives as a claim. Canonicalize
+/// both sides — a symlinked `~/.claude` must still match — then require this
+/// agent's own root and this agent's own file shape.
+pub fn guard(agent: &str, path: PathBuf, home: &Path) -> Option<PathBuf> {
+    let (root, shaped) = allowed(agent)?;
+    let root = home.join(root).canonicalize().ok()?;
+    let real = path.canonicalize().ok()?;
+    let name = real.file_name().and_then(|name| name.to_str())?;
+    (shaped(name) && real.starts_with(&root)).then_some(real)
+}
+
+/// Claude names a project directory after its cwd, with `/` and `.` replaced.
+fn claude_slug(cwd: &str) -> String {
+    cwd.replace(['/', '.'], "-")
+}
+
+pub fn resolve(pane: &PaneRef, home: &Path) -> Option<Source> {
+    if pane.session_kind == Some("path") {
+        let path = guard(pane.agent, PathBuf::from(pane.session_value?), home)?;
+        return source_for(pane.agent, path);
+    }
+    match pane.agent {
+        "claude" => {
+            let projects = home.join(".claude/projects");
+            let by_cwd = projects.join(claude_slug(pane.cwd));
+            let path = match pane.session_value {
+                Some(id) => {
+                    guard("claude", by_cwd.join(format!("{id}.jsonl")), home).or_else(|| {
+                        let wanted = format!("{id}.jsonl");
+                        files(&projects, 2)
+                            .into_iter()
+                            .find(|path| path.file_name().and_then(|n| n.to_str()) == Some(&wanted))
+                            .and_then(|path| guard("claude", path, home))
+                    })
+                }
+                // No id reported: the newest transcript in this cwd's own
+                // project directory is this pane's, or there is none.
+                None => newest(files(&by_cwd, 0)).and_then(|path| guard("claude", path, home)),
+            }?;
+            Some(Source::Lines {
+                path,
+                format: Format::Claude,
+            })
+        }
+        "codex" => {
+            let sessions = home.join(".codex/sessions");
+            // A codex pane reports no session id until it has taken a turn, so
+            // the id is an optimization; the rollout's own `session_meta` names
+            // the cwd and is the fallback. A pane that never ran has no rollout
+            // at all, which correctly resolves to no transcript.
+            let path = match pane.session_value {
+                Some(id) => {
+                    let wanted = format!("-{id}.jsonl");
+                    files(&sessions, 4).into_iter().find(|path| {
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|name| name.ends_with(&wanted))
+                    })
+                }
+                None => newest_rollout_for(&sessions, pane.cwd),
+            }
+            .and_then(|path| guard("codex", path, home))?;
+            Some(Source::Lines {
+                path,
+                format: Format::Codex,
+            })
+        }
+        "grok" => {
+            let dir = home.join(".grok/sessions").join(encode_cwd(pane.cwd));
+            let session = match pane.session_value {
+                Some(id) => dir.join(id),
+                None => newest_child(&dir)?,
+            };
+            let path = guard("grok", session.join("chat_history.jsonl"), home)?;
+            Some(Source::Lines {
+                path,
+                format: Format::Grok,
+            })
+        }
+        "cursor" => {
+            let path = guard(
+                "cursor",
+                cursor_store(pane.cwd, pane.title, pane.session_value, home)?,
+                home,
+            )?;
+            Some(Source::CursorDb { path })
+        }
+        _ => None,
+    }
+}
+
+fn source_for(agent: &str, path: PathBuf) -> Option<Source> {
+    match agent {
+        "claude" => Some(Source::Lines {
+            path,
+            format: Format::Claude,
+        }),
+        "codex" => Some(Source::Lines {
+            path,
+            format: Format::Codex,
+        }),
+        "grok" => Some(Source::Lines {
+            path,
+            format: Format::Grok,
+        }),
+        "cursor" => Some(Source::CursorDb { path }),
+        _ => None,
+    }
+}
+
+/// grok names its session directories after the percent-encoded cwd.
+fn encode_cwd(cwd: &str) -> String {
+    cwd.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// Every file under `dir`, at most `depth` directories deep. One walker, so the
+/// four agents differ in what they filter for rather than in how they search.
+fn files(dir: &Path, depth: usize) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if depth > 0 {
+                out.extend(files(&path, depth - 1));
+            }
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+}
+
+fn newest(paths: Vec<PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().max_by_key(|path| modified(path))
+}
+
+/// grok's sessions are directories; a stray file beside them is not one.
+fn newest_child(dir: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .max_by_key(|path| modified(path))
+}
+
+/// Read one `meta.json`, or `None` when it is missing or unreadable.
+fn cursor_meta(dir: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(dir.join("meta.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Cursor's reported session id does not address its store: the id herdr sees
+/// belongs to a directory that may hold nothing but a prompt history, while the
+/// conversation lives under a different id created when the chat began.
+///
+/// Matching on cwd alone is not enough either — a directory can hold months of
+/// unrelated chats, and the newest of those would be shown as this pane's
+/// history. The reported session's own `createdAtMs` is the floor: the real
+/// conversation cannot predate the session that is asking for it.
+fn cursor_store(
+    cwd: &str,
+    title: Option<&str>,
+    session: Option<&str>,
+    home: &Path,
+) -> Option<PathBuf> {
+    let chats = home.join(".cursor/chats");
+    let floor = session
+        .and_then(|id| {
+            files(&chats, 2)
+                .into_iter()
+                .find(|path| {
+                    path.file_name().and_then(|n| n.to_str()) == Some("meta.json")
+                        && path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            == Some(id)
+                })
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+        })
+        .and_then(|dir| cursor_meta(&dir))
+        .and_then(|meta| meta.get("createdAtMs").and_then(|v| v.as_u64()))
+        .unwrap_or_default();
+
+    let mut best: Option<(bool, u64, PathBuf)> = None;
+    for project in std::fs::read_dir(&chats).ok()?.flatten() {
+        let Ok(sessions) = std::fs::read_dir(project.path()) else {
+            continue;
+        };
+        for session in sessions.flatten() {
+            let dir = session.path();
+            let Some(meta) = cursor_meta(&dir) else {
+                continue;
+            };
+            if meta.get("cwd").and_then(|v| v.as_str()) != Some(cwd)
+                || meta.get("hasConversation").and_then(|v| v.as_bool()) != Some(true)
+            {
+                continue;
+            }
+            let updated = meta
+                .get("updatedAtMs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
+            if updated < floor {
+                continue;
+            }
+            let titled = title.is_some() && meta.get("title").and_then(|v| v.as_str()) == title;
+            let candidate = (titled, updated, dir.join("store.db"));
+            if best.as_ref().is_none_or(|seen| candidate > *seen) {
+                best = Some(candidate);
+            }
+        }
+    }
+    best.map(|(_, _, path)| path)
+}
+
+/// Codex names its rollouts after a timestamp and a session id, never after the
+/// directory it ran in; the cwd lives in the file's first line.
+fn newest_rollout_for(sessions: &Path, cwd: &str) -> Option<PathBuf> {
+    let mut rollouts: Vec<PathBuf> = files(sessions, 4)
+        .into_iter()
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+    // The name starts with an ISO timestamp, so sorting by it is sorting by
+    // start time without opening anything.
+    rollouts.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    rollouts.into_iter().find(|path| {
+        first_line(path)
+            .and_then(|line| {
+                let meta: serde_json::Value = serde_json::from_str(&line).ok()?;
+                Some(meta.get("payload")?.get("cwd")?.as_str()? == cwd)
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// `session_meta` is the first line, and a rollout can reach tens of megabytes;
+/// reading the whole file to look at its head would undo the cache this feeds.
+fn first_line(path: &Path) -> Option<String> {
+    let mut line = String::new();
+    BufReader::new(std::fs::File::open(path).ok()?)
+        .read_line(&mut line)
+        .ok()?;
+    Some(line)
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    /// A scratch home per test. Nothing mutates the process environment, so the
+    /// suite still runs in parallel with everything else.
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-remote-resolve-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+
+    fn pane<'a>(agent: &'a str, value: Option<&'a str>, cwd: &'a str) -> PaneRef<'a> {
+        PaneRef {
+            agent,
+            session_kind: value.map(|_| "id"),
+            session_value: value,
+            cwd,
+            title: None,
+        }
+    }
+
+    #[test]
+    fn a_claude_session_resolves_through_its_cwd_slug() {
+        let home = scratch();
+        let path = home.join(".claude/projects/-mnt-ssd1-repos-herdr-remote/abc.jsonl");
+        touch(&path);
+        let source = resolve(
+            &pane("claude", Some("abc"), "/mnt/ssd1/repos/herdr-remote"),
+            &home,
+        )
+        .unwrap();
+        assert_eq!(
+            source,
+            Source::Lines {
+                path: path.canonicalize().unwrap(),
+                format: Format::Claude
+            }
+        );
+    }
+
+    #[test]
+    fn a_claude_pane_without_an_id_takes_the_newest_transcript_in_its_project() {
+        let home = scratch();
+        let project = home.join(".claude/projects/-repo");
+        touch(&project.join("older.jsonl"));
+        touch(&project.join("newer.jsonl"));
+        // mtime, not name, decides; make the intended winner unambiguously newer.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::open(project.join("newer.jsonl"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        match resolve(&pane("claude", None, "/repo"), &home).unwrap() {
+            Source::Lines { path, .. } => {
+                assert!(path.to_string_lossy().ends_with("newer.jsonl"), "{path:?}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reported_path_outside_the_allowed_roots_is_refused() {
+        let home = scratch();
+        touch(&home.join(".claude/projects/-repo/real.jsonl"));
+        let outside = home.join("elsewhere/secrets.jsonl");
+        touch(&outside);
+        assert!(
+            resolve(
+                &PaneRef {
+                    agent: "claude",
+                    session_kind: Some("path"),
+                    session_value: outside.to_str(),
+                    cwd: "/repo",
+                    title: None,
+                },
+                &home
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_symlink_out_of_an_allowed_root_is_refused() {
+        let home = scratch();
+        let outside = home.join("elsewhere/secrets.jsonl");
+        touch(&outside);
+        let inside = home.join(".claude/projects/-repo/link.jsonl");
+        std::fs::create_dir_all(inside.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &inside).unwrap();
+        assert!(guard("claude", inside, &home).is_none());
+    }
+
+    #[test]
+    fn a_file_inside_a_root_that_is_not_a_transcript_is_refused() {
+        let home = scratch();
+        let path = home.join(".claude/projects/-repo/settings.json");
+        touch(&path);
+        assert!(guard("claude", path, &home).is_none());
+    }
+
+    /// Each agent's root belongs to that agent. A file under claude's root is
+    /// not a cursor store just because someone reported it as one.
+    #[test]
+    fn one_agents_file_is_not_another_agents_transcript() {
+        let home = scratch();
+        let claude_side = home.join(".claude/projects/-repo/store.db");
+        touch(&claude_side);
+        assert!(guard("cursor", claude_side.clone(), &home).is_none());
+        assert!(guard("claude", claude_side, &home).is_none());
+
+        let grok_side = home.join(".grok/sessions/-repo/s1/notes.jsonl");
+        touch(&grok_side);
+        assert!(guard("grok", grok_side, &home).is_none());
+    }
+
+    #[test]
+    fn cursor_prefers_the_store_whose_title_is_the_panes_own() {
+        let home = scratch();
+        for (dir, title, updated) in [
+            ("chats/p1/older", "Review Steering Digest", 10_u64),
+            ("chats/p1/newer", "Something Else", 99),
+        ] {
+            let base = home.join(".cursor").join(dir);
+            touch(&base.join("store.db"));
+            std::fs::write(
+                base.join("meta.json"),
+                serde_json::json!({
+                    "cwd": "/repo", "hasConversation": true,
+                    "title": title, "updatedAtMs": updated
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        let source = resolve(
+            &PaneRef {
+                agent: "cursor",
+                session_kind: Some("id"),
+                session_value: Some("an-id-that-addresses-nothing"),
+                cwd: "/repo",
+                title: Some("Review Steering Digest"),
+            },
+            &home,
+        )
+        .unwrap();
+        match source {
+            Source::CursorDb { path } => {
+                assert!(path.to_string_lossy().contains("older"), "{path:?}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_chat_older_than_the_session_is_not_this_panes_history() {
+        let home = scratch();
+        // The pane's own cursor session: no conversation of its own.
+        let mine = home.join(".cursor/chats/p1/mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(
+            mine.join("meta.json"),
+            serde_json::json!({ "cwd": "/repo", "hasConversation": false,
+                                "createdAtMs": 500u64, "updatedAtMs": 500u64 })
+            .to_string(),
+        )
+        .unwrap();
+        // Yesterday's unrelated chat in the same directory.
+        let stale = home.join(".cursor/chats/p1/stale");
+        touch(&stale.join("store.db"));
+        std::fs::write(
+            stale.join("meta.json"),
+            serde_json::json!({ "cwd": "/repo", "hasConversation": true,
+                                "title": "Slow Count", "createdAtMs": 100u64,
+                                "updatedAtMs": 200u64 })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(resolve(&pane("cursor", Some("mine"), "/repo"), &home).is_none());
+    }
+
+    #[test]
+    fn a_codex_pane_without_an_id_matches_its_rollout_by_cwd() {
+        let home = scratch();
+        let sessions = home.join(".codex/sessions/2026/09/01");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for (name, cwd) in [
+            ("rollout-2026-09-01T01-00-00-aaa.jsonl", "/other"),
+            ("rollout-2026-09-01T02-00-00-bbb.jsonl", "/repo"),
+        ] {
+            std::fs::write(
+                sessions.join(name),
+                format!(
+                    "{}\n",
+                    serde_json::json!({ "type": "session_meta",
+                                        "payload": { "cwd": cwd } })
+                ),
+            )
+            .unwrap();
+        }
+        match resolve(&pane("codex", None, "/repo"), &home).unwrap() {
+            Source::Lines { path, format } => {
+                assert_eq!(format, Format::Codex);
+                assert!(path.to_string_lossy().ends_with("-bbb.jsonl"), "{path:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_agent_has_no_transcript() {
+        let home = scratch();
+        assert!(resolve(&pane("devin", Some("x"), "/repo"), &home).is_none());
+    }
+}
