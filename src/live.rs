@@ -48,10 +48,11 @@ fn border(row: &str, glyph: char) -> bool {
 fn between_borders<'a>(rows: &[&'a str]) -> Option<&'a str> {
     let bottom = rows.iter().rposition(|row| border(row, '▀'))?;
     let top = rows[..bottom].iter().rposition(|row| border(row, '▄'))?;
-    rows[top + 1..bottom]
+    let row = rows[top + 1..bottom]
         .iter()
         .find(|row| !row.trim().is_empty())
-        .copied()
+        .copied()?;
+    row.trim_start().starts_with('→').then_some(row)
 }
 
 #[cfg(test)]
@@ -123,6 +124,12 @@ mod tests {
     #[test]
     fn a_lone_border_is_not_a_box() {
         assert!(composer("cursor", " ▀▀▀▀\n  → draft").is_none());
+    }
+
+    #[test]
+    fn a_bordered_output_panel_is_not_a_cursor_composer() {
+        let screen = " ▄▄▄▄▄▄▄▄\n  ordinary output\n ▀▀▀▀▀▀▀▀";
+        assert!(composer("cursor", screen).is_none());
     }
 
     #[test]
