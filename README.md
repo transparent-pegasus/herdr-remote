@@ -82,7 +82,9 @@ and an unknown `/api` path still 404s instead of handing a fetch a page of HTML.
 `prompt` picks its Herdr call per pane: `agent.prompt` where an agent is attached,
 otherwise `pane.send_input` with a trailing `enter`. `open` and `close` call `pane.zoom`:
 a pane rendered into twenty columns destroys anything it draws, so the pane being read is
-zoomed for as long as it is open. The server holds one slot, and the next `open` releases
+zoomed for as long as it is open. Zoom removes the split, not the window — the pane gets
+whatever width the herdr window has, so nothing here assumes a column count; the screen
+travels as text and scrolls in its own box. The server holds one slot, and the next `open` releases
 whatever the last one left — a phone that dies mid-session is repaired by the next visit
 rather than by a timer.
 
