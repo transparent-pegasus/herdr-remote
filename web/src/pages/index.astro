@@ -36,6 +36,25 @@
       <div class="body"></div>
       <form method="dialog"><button>Close</button></form>
     </dialog>
+    <div id="live" hidden>
+      <span id="draft"></span>
+      <span id="beat" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-label="working"><g>
+          <path d="m14 13-8.381 8.38a1 1 0 0 1-3.001-3l8.384-8.381"/>
+          <path d="m16 16 6-6"/><path d="m21.5 10.5-8-8"/>
+          <path d="m8 8 6-6"/><path d="m8.5 7.5 8 8"/>
+        </g></svg>
+      </span>
+      <button id="expand" aria-label="Show the pane's screen">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M15 3h6v6"/><path d="m21 3-7 7"/>
+          <path d="m3 21 7-7"/><path d="M9 21H3v-6"/>
+        </svg>
+      </button>
+    </div>
+    <dialog id="screen"><pre></pre><form method="dialog"><button>Close</button></form></dialog>
     <pre id="log" hidden></pre>
 
     <form id="composer">
@@ -221,6 +240,48 @@
       // The dialog element itself is the backdrop, so a tap outside the panel closes.
       fullEl.addEventListener("click", (event) => {
         if (event.target === fullEl) fullEl.close();
+      });
+
+      const liveEl = document.querySelector<HTMLDivElement>("#live")!;
+      const draftEl = document.querySelector<HTMLSpanElement>("#draft")!;
+      const beatEl = document.querySelector<HTMLSpanElement>("#beat")!;
+      const expandEl = document.querySelector<HTMLButtonElement>("#expand")!;
+      const screenEl = document.querySelector<HTMLDialogElement>("#screen")!;
+      const screenBodyEl = screenEl.querySelector<HTMLPreElement>("pre")!;
+
+      let screenText = "";
+
+      function paintLive(live: Live, state: string) {
+        draftEl.textContent = live.composer;
+        beatEl.hidden = state !== "working";
+        screenText = live.screen;
+        if (screenEl.open && screenBodyEl.textContent !== live.screen) {
+          screenBodyEl.textContent = live.screen;
+          screenBodyEl.scrollTop = screenBodyEl.scrollHeight;
+        }
+      }
+
+      /** Leaving a pane must not leave its draft, its screen, or its animation behind
+       *  for the next one to show for a tick. */
+      function resetLive() {
+        draftEl.textContent = "";
+        beatEl.hidden = true;
+        screenText = "";
+        screenBodyEl.textContent = "";
+        if (screenEl.open) screenEl.close();
+      }
+
+      // The screen is where a /model picker lives: it never reaches the transcript,
+      // and the pane's status stays `idle` while one is open, so the button is
+      // offered in every state rather than gated on `blocked`.
+      expandEl.addEventListener("click", () => {
+        screenBodyEl.textContent = screenText;
+        screenEl.showModal();
+        screenBodyEl.scrollTop = screenBodyEl.scrollHeight;
+      });
+
+      screenEl.addEventListener("click", (event) => {
+        if (event.target === screenEl) screenEl.close();
       });
 
       const POLL_MS = 3000;
@@ -714,6 +775,50 @@
       #full .body table {
         display: block;
         overflow-x: auto;
+      }
+      #live {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.35rem 0.6rem;
+        border-top: 1px solid var(--line, #333);
+      }
+      /* One line, ellipsised — the treatment .name and .subtitle already use. */
+      #draft {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: ui-monospace, monospace;
+        opacity: 0.75;
+      }
+      #beat svg,
+      #expand svg {
+        width: 22px;
+        height: 22px;
+        overflow: visible; /* the head leaves the 24-unit box when it swings */
+      }
+      #beat g {
+        transform-origin: 17% 89%; /* the handle's tip */
+        animation: strike 1.1s ease-in-out infinite;
+      }
+      @keyframes strike {
+        0%, 45% { transform: rotate(-32deg); }
+        62%     { transform: rotate(6deg); }
+        70%     { transform: rotate(-6deg); }
+        78%     { transform: rotate(2deg); }
+        100%    { transform: rotate(-32deg); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #beat g { animation: none; }
+      }
+      #screen pre {
+        margin: 0;
+        overflow: auto;
+        max-height: 80vh;
+        font-size: 12px;
+        line-height: 1.35;
       }
       /* The list and the log scroll; the composer keeps its own space in the
          column, so neither can end up underneath it. */
