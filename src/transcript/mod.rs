@@ -267,6 +267,20 @@ fn cursor_meta(dir: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// A reported Cursor id is a directory name one level below a project. Join
+/// that exact name under each project instead of walking every chat file.
+fn cursor_created_at(chats: &Path, id: &str) -> Option<u64> {
+    std::fs::read_dir(chats)
+        .ok()?
+        .flatten()
+        .map(|project| project.path().join(id))
+        .find_map(|dir| {
+            cursor_meta(&dir)?
+                .get("createdAtMs")
+                .and_then(|value| value.as_u64())
+        })
+}
+
 /// Cursor's reported session id does not address its store: the id herdr sees
 /// belongs to a directory that may hold nothing but a prompt history, while the
 /// conversation lives under a different id created when the chat began.
@@ -283,19 +297,7 @@ fn cursor_store(
 ) -> Option<PathBuf> {
     let chats = home.join(".cursor/chats");
     let floor = match session {
-        Some(id) => files(&chats, 2)
-            .into_iter()
-            .find(|path| {
-                path.file_name().and_then(|n| n.to_str()) == Some("meta.json")
-                    && path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        == Some(id)
-            })
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .and_then(|dir| cursor_meta(&dir))
-            .and_then(|meta| meta.get("createdAtMs").and_then(|v| v.as_u64()))?,
+        Some(id) => cursor_created_at(&chats, id)?,
         None => 0,
     };
 

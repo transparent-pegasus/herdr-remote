@@ -16,9 +16,31 @@ use tower_http::services::{ServeDir, ServeFile};
 
 type ApiResult<T> = Result<T, (StatusCode, &'static str)>;
 
-/// One parsed transcript per pane, keyed with the source it was parsed from so
-/// a pane that starts a new session does not keep serving the old one.
-type CacheEntry = (transcript::Source, Arc<Mutex<Transcript>>);
+#[derive(Clone, PartialEq, Eq)]
+struct TranscriptIdentity {
+    agent: String,
+    session_kind: Option<String>,
+    session_value: Option<String>,
+    cwd: String,
+    title: Option<String>,
+}
+
+impl TranscriptIdentity {
+    fn pane(&self) -> transcript::PaneRef<'_> {
+        transcript::PaneRef {
+            agent: &self.agent,
+            session_kind: self.session_kind.as_deref(),
+            session_value: self.session_value.as_deref(),
+            cwd: &self.cwd,
+            title: self.title.as_deref(),
+        }
+    }
+}
+
+/// A cached miss is meaningful too: resolving walks agent-owned directories,
+/// so the same pane identity must not repeat that work every three seconds.
+type ResolvedTranscript = (transcript::Source, Arc<Mutex<Transcript>>);
+type CacheEntry = (TranscriptIdentity, Option<ResolvedTranscript>);
 type Cache = Arc<Mutex<HashMap<String, CacheEntry>>>;
 
 /// The single pane this server has zoomed. A `tokio` mutex, because the
@@ -210,29 +232,43 @@ fn card(message: &transcript::Message) -> Card {
 fn take_window(
     cache: Cache,
     key: String,
-    source: transcript::Source,
+    identity: TranscriptIdentity,
+    home: std::path::PathBuf,
     before: Option<u64>,
     limit: usize,
 ) -> anyhow::Result<Option<(String, Vec<transcript::Message>, bool)>> {
-    let entry = {
-        let mut map = cache
+    let cached = {
+        let map = cache
             .lock()
             .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
-        let stale = map.get(&key).is_none_or(|(cached, _)| *cached != source);
-        if stale {
-            map.insert(
-                key.clone(),
-                (
-                    source.clone(),
-                    Arc::new(Mutex::new(Transcript::open(source))),
-                ),
-            );
+        map.get(&key)
+            .filter(|(cached, _)| *cached == identity)
+            .map(|(_, resolved)| {
+                resolved
+                    .as_ref()
+                    .map(|(_, transcript)| Arc::clone(transcript))
+            })
+    };
+    let entry = match cached {
+        Some(Some(entry)) => entry,
+        Some(None) => return Ok(None),
+        None => {
+            let resolved = transcript::resolve(&identity.pane(), &home).map(|source| {
+                let transcript = Arc::new(Mutex::new(Transcript::open(source.clone())));
+                (source, transcript)
+            });
+            let entry = resolved
+                .as_ref()
+                .map(|(_, transcript)| Arc::clone(transcript));
+            cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?
+                .insert(key.clone(), (identity, resolved));
+            let Some(entry) = entry else {
+                return Ok(None);
+            };
+            entry
         }
-        Arc::clone(
-            &map.get(&key)
-                .ok_or_else(|| anyhow::anyhow!("transcript cache entry disappeared"))?
-                .1,
-        )
     };
     let mut transcript = entry
         .lock()
@@ -248,6 +284,7 @@ fn take_window(
                 .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
             if map
                 .get(&key)
+                .and_then(|(_, resolved)| resolved.as_ref())
                 .is_some_and(|(_, cached)| Arc::ptr_eq(cached, &entry))
             {
                 map.remove(&key);
@@ -273,34 +310,31 @@ async fn transcript_route(
         .await
         .map_err(failed("could not read the herdr session"))?
         .ok_or((StatusCode::NOT_FOUND, "no such pane"))?;
-    let home = transcript::home();
     let session = context.session.as_ref();
-    let source = transcript::resolve(
-        &transcript::PaneRef {
-            agent: context.agent.as_deref().unwrap_or_default(),
-            session_kind: session.map(|session| session.kind.as_str()),
-            session_value: session.map(|session| session.value.as_str()),
-            cwd: &context.cwd,
-            title: context.title.as_deref(),
-        },
-        &home,
-    )
-    .ok_or((StatusCode::NOT_FOUND, "no transcript for this pane"))?;
+    let identity = TranscriptIdentity {
+        agent: context.agent.unwrap_or_default(),
+        session_kind: session.map(|session| session.kind.clone()),
+        session_value: session.map(|session| session.value.clone()),
+        cwd: context.cwd,
+        title: context.title,
+    };
 
     let limit = query.limit.unwrap_or(30).clamp(1, 200);
     let before = query.before;
     let cache = state.transcripts.clone();
     let key = pane_id.clone();
-    let taken = tokio::task::spawn_blocking(move || take_window(cache, key, source, before, limit))
-        .await
-        .map_err(|error| {
-            eprintln!("transcript task failed: {error}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not read the transcript",
-            )
-        })?
-        .map_err(failed("could not read the transcript"))?;
+    let home = transcript::home();
+    let taken =
+        tokio::task::spawn_blocking(move || take_window(cache, key, identity, home, before, limit))
+            .await
+            .map_err(|error| {
+                eprintln!("transcript task failed: {error}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not read the transcript",
+                )
+            })?
+            .map_err(failed("could not read the transcript"))?;
     let Some((version, messages, has_more)) = taken else {
         return Err((StatusCode::NOT_FOUND, "no transcript for this pane"));
     };
@@ -635,6 +669,74 @@ mod tests {
         }
     }
 
+    fn transcript_identity() -> TranscriptIdentity {
+        TranscriptIdentity {
+            agent: "claude".into(),
+            session_kind: None,
+            session_value: None,
+            cwd: "/repo".into(),
+            title: None,
+        }
+    }
+
+    fn insert_cached(
+        cache: &Cache,
+        key: &str,
+        identity: &TranscriptIdentity,
+        source: transcript::Source,
+    ) -> Arc<Mutex<Transcript>> {
+        let transcript = Arc::new(Mutex::new(Transcript::open(source.clone())));
+        cache.lock().unwrap().insert(
+            key.into(),
+            (identity.clone(), Some((source, Arc::clone(&transcript)))),
+        );
+        transcript
+    }
+
+    fn scratch_home(label: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "herdr-remote-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
+    fn write_claude(home: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf {
+        let path = home.join(".claude/projects/-repo").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::json!({ "type": "user", "message": { "content": text } })
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    fn newest_text(
+        cache: &Cache,
+        identity: &TranscriptIdentity,
+        home: &std::path::Path,
+    ) -> Option<String> {
+        take_window(
+            cache.clone(),
+            "pane".into(),
+            identity.clone(),
+            home.to_path_buf(),
+            None,
+            30,
+        )
+        .unwrap()?
+        .1
+        .first()
+        .map(|message| message.text.clone())
+    }
+
     #[test]
     fn a_non_missing_refresh_error_keeps_the_cached_transcript() {
         let path = std::env::temp_dir().join(format!(
@@ -645,8 +747,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         let cache = Cache::default();
+        let identity = transcript_identity();
+        insert_cached(&cache, "pane", &identity, line_source(path));
 
-        let result = take_window(cache.clone(), "pane".into(), line_source(path), None, 30);
+        let result = take_window(
+            cache.clone(),
+            "pane".into(),
+            identity,
+            std::path::PathBuf::new(),
+            None,
+            30,
+        );
 
         assert!(result.is_err());
         assert!(cache.lock().unwrap().contains_key("pane"));
@@ -661,8 +772,17 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         let cache = Cache::default();
+        let identity = transcript_identity();
+        insert_cached(&cache, "pane", &identity, line_source(path));
 
-        let result = take_window(cache.clone(), "pane".into(), line_source(path), None, 30);
+        let result = take_window(
+            cache.clone(),
+            "pane".into(),
+            identity,
+            std::path::PathBuf::new(),
+            None,
+            30,
+        );
 
         assert!(matches!(result, Ok(None)));
         assert!(!cache.lock().unwrap().contains_key("pane"));
@@ -677,16 +797,21 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         let source = line_source(path);
-        let transcript = Arc::new(Mutex::new(Transcript::open(source.clone())));
+        let identity = transcript_identity();
         let cache = Cache::default();
-        cache
-            .lock()
-            .unwrap()
-            .insert("busy".into(), (source.clone(), Arc::clone(&transcript)));
+        let transcript = insert_cached(&cache, "busy", &identity, source);
         let held = transcript.lock().unwrap();
         let worker_cache = cache.clone();
-        let worker =
-            std::thread::spawn(move || take_window(worker_cache, "busy".into(), source, None, 30));
+        let worker = std::thread::spawn(move || {
+            take_window(
+                worker_cache,
+                "busy".into(),
+                identity,
+                std::path::PathBuf::new(),
+                None,
+                30,
+            )
+        });
 
         while Arc::strong_count(&transcript) < 3 {
             std::thread::yield_now();
@@ -706,6 +831,59 @@ mod tests {
         drop(held);
         assert!(matches!(worker.join().unwrap(), Ok(None)));
         probe.join().unwrap();
+    }
+
+    #[test]
+    fn resolution_is_reused_until_the_pane_identity_changes() {
+        let home = scratch_home("resolution-cache");
+        write_claude(&home, "older.jsonl", "older");
+        let cache = Cache::default();
+        let identity = transcript_identity();
+
+        assert_eq!(
+            newest_text(&cache, &identity, &home).as_deref(),
+            Some("older")
+        );
+
+        let newer = write_claude(&home, "newer.jsonl", "newer");
+        std::fs::File::open(&newer)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            newest_text(&cache, &identity, &home).as_deref(),
+            Some("older")
+        );
+
+        let changed = TranscriptIdentity {
+            title: Some("new title".into()),
+            ..identity
+        };
+        assert_eq!(
+            newest_text(&cache, &changed, &home).as_deref(),
+            Some("newer")
+        );
+    }
+
+    #[test]
+    fn a_resolution_miss_is_reused_until_the_identity_changes() {
+        let home = scratch_home("resolution-miss");
+        let cache = Cache::default();
+        let identity = transcript_identity();
+
+        assert_eq!(newest_text(&cache, &identity, &home), None);
+
+        write_claude(&home, "session.jsonl", "ready");
+        assert_eq!(newest_text(&cache, &identity, &home), None);
+
+        let changed = TranscriptIdentity {
+            title: Some("new title".into()),
+            ..identity
+        };
+        assert_eq!(
+            newest_text(&cache, &changed, &home).as_deref(),
+            Some("ready")
+        );
     }
 
     #[test]
