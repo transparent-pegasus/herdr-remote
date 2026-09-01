@@ -11,6 +11,7 @@ pub fn strip(text: &str) -> String {
     let mut out = text.to_string();
     for (open, close) in [
         ("<system-reminder>", "</system-reminder>"),
+        ("<task-notification>", "</task-notification>"),
         ("<user_info>", "</user_info>"),
         ("<timestamp>", "</timestamp>"),
     ] {

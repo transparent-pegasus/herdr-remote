@@ -87,6 +87,20 @@ mod tests {
     }
 
     #[test]
+    fn a_task_notification_is_not_something_the_person_said() {
+        let line = r#"{"type":"response_item","payload":{"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"<task-notification>worker finished</task-notification>"}]}}"#;
+        assert!(parse_line(line, 1).is_none());
+    }
+
+    #[test]
+    fn a_task_notification_does_not_hide_real_user_text() {
+        let line = r#"{"type":"response_item","payload":{"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"keep this\n<task-notification>worker finished</task-notification>"}]}}"#;
+        assert_eq!(parse_line(line, 1).unwrap().text, "keep this");
+    }
+
+    #[test]
     fn a_part_that_is_not_a_text_part_is_ignored_even_carrying_text() {
         let line = r#"{"type":"response_item","payload":{"type":"message","role":"assistant",
             "content":[{"type":"reasoning_text","text":"thought"},
