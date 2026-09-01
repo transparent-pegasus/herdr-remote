@@ -1098,6 +1098,13 @@
       #beat[hidden] {
         display: none;
       }
+      /* A transcript is read from its foot, so a history too short to fill the
+         column rests on the composer with the space above it, not below. An
+         `auto` margin, not `justify-content`, because once the cards do
+         overflow it resolves to nothing and leaves the scroll alone. */
+      #transcript li:first-of-type {
+        margin-top: auto;
+      }
       #transcript li {
         border-radius: 10px;
       }
@@ -1218,16 +1225,20 @@
         overflow-x: auto;
       }
       /* A terminal screen is a fixed grid whose boxes wrapping would break, so
-         it is scaled to whatever fits instead of scrolled. */
-      /* Centred in both axes: a screen narrower or shorter than the sheet sits
-         in the middle of it rather than in a corner. Scaling from the middle is
-         what keeps it there once `fitScreen` shrinks an oversized one. */
+         it is scaled to whatever fits instead of scrolled — and centred in both
+         axes, so one smaller than the sheet sits in the middle of it rather
+         than in a corner. Scaling from the middle is what keeps an oversized
+         one centred too, once `fitScreen` has shrunk it. */
       #screen .body {
-        display: grid;
-        place-items: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         overflow: hidden;
       }
+      /* `flex: none`: the screen keeps its own width so `fitScreen` scales it,
+         rather than being squeezed into a box its unwrappable lines overflow. */
       #screen pre {
+        flex: none;
         width: max-content;
         margin: 0;
         font: 12px/1.35 ui-monospace, monospace;

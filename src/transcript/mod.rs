@@ -32,6 +32,18 @@ pub struct Message {
 mod tests {
     use super::*;
 
+    /// The empty history a new session shows rests on this: a pane running an
+    /// agent this server can read has one, and every other pane has none.
+    #[test]
+    fn an_agent_is_parsable_when_it_has_a_format() {
+        for agent in ["claude", "codex", "grok", "cursor"] {
+            assert!(parsable(agent), "{agent}");
+        }
+        for agent in ["aider", "", "Claude"] {
+            assert!(!parsable(agent), "{agent}");
+        }
+    }
+
     #[test]
     fn roles_serialize_in_the_shape_the_phone_reads() {
         let message = Message {
