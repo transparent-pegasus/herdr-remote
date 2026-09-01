@@ -1043,7 +1043,10 @@
         margin-left: 15%;
         background: var(--card-user);
       }
+      /* The agent lane is nearly the page's own colour, so it takes the same
+         1px the pane rows use to stand apart from it. */
       #transcript li[data-role="assistant"] {
+        border: 1px solid var(--edge);
         background: var(--card-agent);
       }
       /* Plain text in one node, which is what lets the clamp cut at three lines and
