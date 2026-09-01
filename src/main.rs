@@ -453,15 +453,34 @@ fn superseded(slot: &Option<String>, pane_id: &str) -> Option<String> {
     slot.clone().filter(|held| held != pane_id)
 }
 
+/// What herdr already has zoomed decides the whole of `open`: a pane that is
+/// zoomed needs nothing done to it, and one this server did not zoom itself is
+/// the operator's own layout, which it neither repeats nor takes away.
 async fn open(State(state): State<AppState>, Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
+    // A snapshot this server could not read decides nothing, and it falls back
+    // to acting blind, which is all it could do before it thought to ask.
+    let zoomed = herdr::zoomed().await.ok();
+    let already = |pane: &str| {
+        zoomed
+            .as_ref()
+            .is_some_and(|held| held.iter().any(|zoomed| zoomed == pane))
+    };
+    let unzoomed = |pane: &str| zoomed.is_some() && !already(pane);
     let mut slot = state.zoomed.0.lock().await;
     if let Some(previous) = superseded(&slot, &pane_id) {
-        // herdr keeps one zoom per tab, so zooming the new pane moves the zoom
-        // anyway; a failure here is worth reporting and not worth refusing the
-        // pane the phone actually asked for.
-        if let Err(error) = herdr::zoom(&previous, false).await {
+        // herdr keeps one zoom per tab, so the pane this server zoomed may have
+        // lost the zoom to a neighbour already; asking for it down then would
+        // take that neighbour's zoom with it. A failure is worth reporting and
+        // not worth refusing the pane the phone actually asked for.
+        if !unzoomed(&previous)
+            && let Err(error) = herdr::zoom(&previous, false).await
+        {
             eprintln!("could not unzoom {previous}: {error:#}");
         }
+        *slot = None;
+    }
+    if already(&pane_id) {
+        return Ok(StatusCode::NO_CONTENT);
     }
     herdr::zoom(&pane_id, true)
         .await
@@ -499,6 +518,16 @@ async fn close(
     }
     let mut slot = state.zoomed.0.lock().await;
     if slot.as_deref() != Some(pane_id.as_str()) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    // The zoom this server took can be gone already — the operator unzoomed it,
+    // or zoomed a neighbour, which in herdr is the one zoom moving. Asking for
+    // it back down would be taking away a zoom that is no longer ours. A
+    // snapshot that cannot be read says nothing, and the blind release stands.
+    if let Ok(zoomed) = herdr::zoomed().await
+        && !zoomed.iter().any(|held| held == &pane_id)
+    {
+        *slot = None;
         return Ok(StatusCode::NO_CONTENT);
     }
     herdr::zoom(&pane_id, false)
@@ -1401,31 +1430,69 @@ mod tests {
         assert_eq!(superseded(&Some("w1:p1".into()), "w1:p1"), None);
     }
 
+    /// A snapshot whose only zoom is `pane_id`, in the shape `herdr::zoomed`
+    /// reads: the zoom lives on the tab's layout, not on the pane.
+    fn zoom_snapshot(pane_id: &str) -> Vec<u8> {
+        format!(
+            "{{\"id\":\"herdr-remote\",\"result\":{{\"snapshot\":{{\"workspaces\":[],\
+             \"tabs\":[],\"panes\":[],\"layouts\":[{{\"zoomed\":true,\
+             \"focused_pane_id\":\"{pane_id}\"}}]}}}}}}\n"
+        )
+        .into_bytes()
+    }
+
+    /// Both halves of the zoom rule in one test: the socket the fake listens on
+    /// is the whole process's, so two tests holding one at a time would race.
     #[tokio::test]
-    async fn opening_a_second_pane_unzooms_the_first_before_zooming_the_second() {
+    async fn open_moves_the_zoom_only_where_herdr_has_not_already() {
         let reply = b"{\"id\":\"herdr-remote\",\"result\":{}}\n";
-        let (socket, mut requests) = herdr::fake_herdr(vec![reply, reply]);
-        let _socket = herdr::use_test_socket(socket);
-        let state = AppState::default();
-        *state.zoomed.0.lock().await = Some("w1:p1".into());
+        let snapshot = Box::leak(zoom_snapshot("w1:p1").into_boxed_slice());
 
-        assert_eq!(
-            open(State(state), Path("w1:p2".into())).await,
-            Ok(StatusCode::NO_CONTENT)
-        );
+        // The pane the phone leaves is released, and the one it asks for zoomed.
+        {
+            let (socket, mut requests) = herdr::fake_herdr(vec![snapshot, reply, reply]);
+            let _socket = herdr::use_test_socket(socket);
+            let state = AppState::default();
+            *state.zoomed.0.lock().await = Some("w1:p1".into());
 
-        let first = requests.recv().await.unwrap();
-        let second = requests.recv().await.unwrap();
-        assert_eq!(first["method"], "pane.zoom");
-        assert_eq!(
-            first["params"],
-            serde_json::json!({ "pane_id": "w1:p1", "zoomed": false })
-        );
-        assert_eq!(second["method"], "pane.zoom");
-        assert_eq!(
-            second["params"],
-            serde_json::json!({ "pane_id": "w1:p2", "zoomed": true })
-        );
+            assert_eq!(
+                open(State(state), Path("w1:p2".into())).await,
+                Ok(StatusCode::NO_CONTENT)
+            );
+
+            assert_eq!(requests.recv().await.unwrap()["method"], "session.snapshot");
+            let first = requests.recv().await.unwrap();
+            let second = requests.recv().await.unwrap();
+            assert_eq!(first["method"], "pane.zoom");
+            assert_eq!(
+                first["params"],
+                serde_json::json!({ "pane_id": "w1:p1", "zoomed": false })
+            );
+            assert_eq!(second["method"], "pane.zoom");
+            assert_eq!(
+                second["params"],
+                serde_json::json!({ "pane_id": "w1:p2", "zoomed": true })
+            );
+        }
+
+        // The operator's own zoom, or this server's from an earlier open: either
+        // way the pane is already where the phone wants it, and toggling it
+        // would be the layout moving under the operator for nothing.
+        {
+            let (socket, mut requests) = herdr::fake_herdr(vec![snapshot]);
+            let _socket = herdr::use_test_socket(socket);
+            let state = AppState::default();
+
+            assert_eq!(
+                open(State(state.clone()), Path("w1:p1".into())).await,
+                Ok(StatusCode::NO_CONTENT)
+            );
+
+            assert_eq!(requests.recv().await.unwrap()["method"], "session.snapshot");
+            assert!(requests.try_recv().is_err(), "no zoom call belongs here");
+            // Nothing this server zoomed is nothing for `close` to release.
+            assert_eq!(*state.zoomed.0.lock().await, None);
+        }
     }
 
     #[test]

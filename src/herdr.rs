@@ -101,6 +101,15 @@ struct Snapshot {
     workspaces: Vec<WorkspaceInfo>,
     tabs: Vec<TabInfo>,
     panes: Vec<PaneInfo>,
+    /// One entry per tab, and the only place herdr reports a zoom.
+    #[serde(default)]
+    layouts: Vec<LayoutInfo>,
+}
+
+#[derive(Deserialize)]
+struct LayoutInfo {
+    zoomed: bool,
+    focused_pane_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -260,6 +269,19 @@ pub async fn pane_context(pane_id: &str) -> Result<Option<PaneContext>> {
 /// A pane rendered into twenty columns destroys anything it draws. Zooming
 /// hands it the whole herdr window instead — as wide as the operator keeps that
 /// window, which is all this can do and why nothing here expects a width.
+/// Every pane herdr already has zoomed — at most one per tab. A pane in here
+/// needs no zooming, and one this server did not zoom is the operator's own
+/// layout, which it must not undo.
+pub async fn zoomed() -> Result<Vec<String>> {
+    Ok(snapshot()
+        .await?
+        .layouts
+        .into_iter()
+        .filter(|layout| layout.zoomed)
+        .filter_map(|layout| layout.focused_pane_id)
+        .collect())
+}
+
 pub async fn zoom(pane_id: &str, on: bool) -> Result<()> {
     call("pane.zoom", json!({ "pane_id": pane_id, "zoomed": on })).await?;
     Ok(())
