@@ -922,9 +922,19 @@
         min-height: 100dvh;
         max-height: 100dvh;
         margin: 0 auto;
-        max-width: 34rem;
-        padding: 0 1rem;
+        max-width: 36rem;
         font: 1rem/1.5 system-ui, sans-serif;
+      }
+      /* Every child carries the page's 1rem inset itself. On a scrolling one
+         that puts the bar at the page's edge, outside the text, which is the
+         whole reason the padding is not on the body. */
+      noscript {
+        display: block;
+      }
+      header,
+      noscript,
+      #status {
+        padding: 0 1rem;
       }
       header {
         display: flex;
@@ -974,8 +984,9 @@
         place-items: center;
         flex: none;
         width: 100%;
-        height: 2.25rem;
-        padding: 0;
+        /* Air above the icon, and the list's own gap supplying as much below,
+           so the control sits evenly between the edge and the oldest card. */
+        padding: 0.5rem 0 0;
         border: 0;
         background: transparent;
         color: inherit;
@@ -995,7 +1006,7 @@
         flex: 1;
         list-style: none;
         margin: 0;
-        padding: 0 0 0.5rem;
+        padding: 0 1rem 0.5rem;
         overflow-y: auto;
         overscroll-behavior: contain;
         display: flex;
@@ -1159,7 +1170,7 @@
         display: flex;
         align-items: center;
         gap: 0.5rem;
-        padding: 0.35rem 0.6rem;
+        padding: 0.35rem 1rem;
         border-top: 1px solid var(--line, #333);
       }
       /* One line, ellipsised — the treatment .name and .subtitle already use. */
@@ -1214,6 +1225,7 @@
       #list,
       #log {
         flex: 1;
+        padding: 0 1rem;
         overflow-y: auto;
         overscroll-behavior: contain;
       }
@@ -1271,7 +1283,7 @@
         display: grid;
         /* 6px above and below the pane label, matching the header's air. */
         gap: 6px;
-        padding: 6px 0 calc(6px + env(safe-area-inset-bottom));
+        padding: 6px 1rem calc(6px + env(safe-area-inset-bottom));
         border-top: 1px solid var(--edge);
         background: Canvas;
       }
@@ -1385,16 +1397,6 @@
         border-radius: 0.5rem;
         background: none;
         color: inherit;
-      }
-      #more {
-        margin-bottom: 0.5rem;
-        padding: 0.5rem;
-        border: 1px solid var(--edge);
-        border-radius: 0.5rem;
-        background: none;
-        color: inherit;
-        font: inherit;
-        font-size: 0.85rem;
       }
       /* Older WebViews do not mark the UA [hidden] rule !important. */
       #more[hidden],
