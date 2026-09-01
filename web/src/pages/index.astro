@@ -30,14 +30,26 @@
     <noscript>This page needs JavaScript to list panes and send prompts.</noscript>
     <p id="status" role="status"></p>
     <div id="list"></div>
-    <button id="more" type="button" hidden>Load earlier</button>
-    <ol id="transcript" hidden></ol>
+    <div id="logarea">
+      <button id="more" type="button" hidden aria-label="Load earlier">
+        <svg viewBox="0 0 24 24" aria-hidden="true"
+          ><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1.06 6.74 2.74L21 8" /><path
+            d="M21 3v5h-5"
+        /></svg>
+      </button>
+      <ol id="transcript" hidden></ol>
+      <pre id="log" hidden></pre>
+    </div>
     <dialog id="full">
       <div class="body"></div>
-      <form method="dialog"><button>Close</button></form>
+      <button id="full-close" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+        </svg>
+      </button>
     </dialog>
     <div id="live" hidden>
-      <span id="draft"></span>
       <span id="beat" hidden>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-label="working"><g>
@@ -46,6 +58,7 @@
           <path d="m8 8 6-6"/><path d="m8.5 7.5 8 8"/>
         </g></svg>
       </span>
+      <span id="draft"></span>
       <button id="expand" aria-label="Show the pane's screen">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -55,7 +68,6 @@
       </button>
     </div>
     <dialog id="screen"><pre></pre><form method="dialog"><button>Close</button></form></dialog>
-    <pre id="log" hidden></pre>
 
     <form id="composer">
       <label for="text" id="target"></label>
@@ -219,9 +231,17 @@
           transcriptEl.scrollHeight,
         );
         const top = transcriptEl.scrollTop;
-        transcriptEl.replaceChildren(...cards.map(cardEl));
+        transcriptEl.replaceChildren(moreEl, ...cards.map(cardEl));
         paintedCards = cards;
         transcriptEl.scrollTop = follow ? transcriptEl.scrollHeight : top;
+      }
+
+      /** The control rides at the top of whichever view is scrolling. The card
+       *  list can hold it as a child; the raw log is a single text node that
+       *  `paint()` replaces, so there it sits directly above instead. */
+      function parkMore(inTranscript: boolean) {
+        const home = inTranscript ? transcriptEl : logareaEl;
+        if (moreEl.parentElement !== home) home.prepend(moreEl);
       }
 
       // The agent's HTML was rendered by the server, which escapes raw HTML and
@@ -231,7 +251,16 @@
         const { wrap, html } = modalContent(card);
         fullBodyEl.classList.toggle("wrap", wrap);
         fullBodyEl.innerHTML = html;
-        fullEl.showModal();
+        fullBodyEl.scrollTop = 0;
+        // The composer keeps its own height in the column, and the view stops
+        // above it, so the controls stay usable while a message is open.
+        fullEl.style.setProperty(
+          "--composer-h",
+          `${composerEl.getBoundingClientRect().height}px`,
+        );
+        // show(), not showModal(): a modal makes everything outside it inert,
+        // and the controls underneath have to keep working.
+        fullEl.show();
       }
 
       transcriptEl.addEventListener("click", (event) => {
@@ -243,9 +272,13 @@
         if (card) openCard(card);
       });
 
-      // The dialog element itself is the backdrop, so a tap outside the panel closes.
-      fullEl.addEventListener("click", (event) => {
-        if (event.target === fullEl) fullEl.close();
+      document
+        .querySelector<HTMLButtonElement>("#full-close")!
+        .addEventListener("click", () => fullEl.close());
+
+      // A non-modal dialog gets no Escape handling of its own.
+      addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && fullEl.open) fullEl.close();
       });
 
       const liveEl = document.querySelector<HTMLDivElement>("#live")!;
@@ -396,7 +429,7 @@
         painted = "";
         logEl.textContent = "";
         lines = LINES;
-        transcriptEl.replaceChildren();
+        transcriptEl.replaceChildren(moreEl);
         transcriptEl.hidden = true;
         logEl.hidden = true;
         liveEl.hidden = true;
@@ -449,6 +482,7 @@
 
         if (page !== null) {
           transcriptEl.hidden = false;
+          parkMore(true);
           logEl.hidden = true;
           if (page !== "unchanged") {
             cards = replaceTail(cards, page.messages);
@@ -469,6 +503,7 @@
             moreEl.hidden = true;
           } else {
             logEl.hidden = false;
+            parkMore(false);
             const output = await fetchOutput(
               pane.id,
               lines,
@@ -745,6 +780,56 @@
         moreEl.hidden = !page.has_more;
       });
 
+      // On a touch screen the reload control is not a button to find but a drag
+      // from the top of the log: pull down, the icon comes with it, let go past
+      // the threshold and it loads. `overscroll-behavior-y` keeps the browser's
+      // own pull-to-refresh out of the way.
+      const logareaEl = document.querySelector<HTMLDivElement>("#logarea")!;
+      const PULL_LIMIT = 72;
+      const PULL_TRIGGER = 56;
+      let pullFrom: number | null = null;
+      let pulled = 0;
+
+      function pullScroller(): HTMLElement | null {
+        if (!transcriptEl.hidden) return transcriptEl;
+        if (!logEl.hidden) return logEl;
+        return null;
+      }
+
+      logareaEl.addEventListener(
+        "touchstart",
+        (event) => {
+          const scroller = pullScroller();
+          pulled = 0;
+          pullFrom =
+            !moreEl.hidden && scroller !== null && scroller.scrollTop <= 0
+              ? event.touches[0].clientY
+              : null;
+        },
+        { passive: true },
+      );
+
+      logareaEl.addEventListener(
+        "touchmove",
+        (event) => {
+          if (pullFrom === null) return;
+          pulled = Math.max(
+            0,
+            Math.min(PULL_LIMIT, event.touches[0].clientY - pullFrom),
+          );
+          moreEl.style.setProperty("--pull", `${pulled}px`);
+        },
+        { passive: true },
+      );
+
+      logareaEl.addEventListener("touchend", () => {
+        const load = pullFrom !== null && pulled >= PULL_TRIGGER;
+        pullFrom = null;
+        pulled = 0;
+        moreEl.style.removeProperty("--pull");
+        if (load) moreEl.click();
+      });
+
       refreshEl.addEventListener("click", () => {
         say("Loading…");
         load();
@@ -759,6 +844,21 @@
       :root {
         --edge: color-mix(in srgb, currentColor 15%, transparent);
         --muted: color-mix(in srgb, currentColor 60%, transparent);
+        /* The two lanes sit at one OKLCH lightness (0.3456) and differ only in
+           hue, so neither reads as the louder half. The user's hue and chroma
+           are the favicon's own — 66,249 of its chromatic pixels average
+           189.3deg — kept at the darkness the mark uses. The agent's is the
+           same lightness with the chroma taken out. Against the page text they
+           measure 8.96:1 and 9.25:1, a 3% spread. */
+        --card-user: #004340;
+        --card-agent: #393939;
+        --full-gap: 1rem;
+      }
+      /* The page owns its overscroll: a downward drag is the transcript's
+         "load earlier" gesture, not the browser's reload. */
+      html,
+      body {
+        overscroll-behavior-y: contain;
       }
       body {
         display: flex;
@@ -797,6 +897,44 @@
         color: inherit;
         font-weight: 600;
       }
+      /* One positioned column for whichever view is showing, so the pull
+         control can sit on its top edge and the hammer on its bottom one. It
+         only claims the column's spare height when it has something to show;
+         otherwise the pane list keeps it. */
+      #logarea {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      #logarea:has(> :not([hidden])) {
+        flex: 1;
+      }
+      /* A reload icon that rides at the very top of the scrolling history, so
+         reaching the oldest card is what brings it into view. A drag from the
+         top on a touch screen turns it as it goes and loads on release. */
+      #more {
+        display: grid;
+        place-items: center;
+        flex: none;
+        width: 100%;
+        height: 2.25rem;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      #more svg {
+        width: 20px;
+        height: 20px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        transform: rotate(calc(var(--pull, 0px) * 4deg));
+      }
       #transcript {
         flex: 1;
         list-style: none;
@@ -812,7 +950,9 @@
          `display` of our own would win over it — the same reason `#log[hidden]`
          already exists below. */
       #transcript[hidden],
-      #live[hidden] {
+      #live[hidden],
+      #more[hidden],
+      #beat[hidden] {
         display: none;
       }
       #transcript li {
@@ -832,10 +972,10 @@
       }
       #transcript li[data-role="user"] {
         margin-left: 15%;
-        background: var(--accent-soft, #26323d);
+        background: var(--card-user);
       }
       #transcript li[data-role="assistant"] {
-        background: var(--panel, #1c1c1c);
+        background: var(--card-agent);
       }
       /* Plain text in one node, which is what lets the clamp cut at three lines and
          append its ellipsis; markup would give it block children to trip on. */
@@ -848,12 +988,36 @@
         line-clamp: 3;
         overflow: hidden;
       }
+      /* Edge to edge and over the header, with air above and below and the
+         controls still reachable underneath — so it is opened with show(),
+         not showModal(), which would make the rest of the page inert. The
+         only edges it draws are the two shadows. */
       #full {
-        max-width: min(46rem, 92vw);
-        max-height: 82vh;
+        position: fixed;
+        top: var(--full-gap);
+        left: 0;
+        right: 0;
+        z-index: 10;
+        height: calc(100dvh - var(--composer-h, 9rem) - var(--full-gap) * 2);
+        max-width: none;
+        max-height: none;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        overflow: hidden;
+        background: Canvas;
+        color: inherit;
+        box-shadow:
+          0 -1px 0 #fff,
+          0 1px 0 #fff;
+      }
+      #full .body {
+        height: 100%;
         overflow: auto;
-        border: none;
-        border-radius: 12px;
+        overscroll-behavior: contain;
+        /* Room at the foot for the close control that floats over it. */
+        padding: 0.5rem 0.75rem 3rem;
       }
       #full .body.wrap {
         white-space: pre-wrap;
@@ -862,6 +1026,22 @@
       #full .body table {
         display: block;
         overflow-x: auto;
+      }
+      #full-close {
+        position: absolute;
+        right: 0.5rem;
+        bottom: 0.5rem;
+        display: grid;
+        place-items: center;
+        padding: 0.35rem;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      #full-close svg {
+        width: 24px;
+        height: 24px;
       }
       #live {
         display: flex;
@@ -880,11 +1060,28 @@
         font-family: ui-monospace, monospace;
         opacity: 0.75;
       }
-      #beat svg,
+      /* The hammer holds the band's left edge and the screen button its right,
+         with the draft between them. */
+      #beat {
+        display: grid;
+        place-items: center;
+        pointer-events: none;
+      }
+      #beat svg {
+        width: 26px;
+        height: 26px;
+        overflow: visible; /* the head leaves the 24-unit box when it swings */
+      }
+      #expand {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
       #expand svg {
         width: 22px;
         height: 22px;
-        overflow: visible; /* the head leaves the 24-unit box when it swings */
       }
       #beat g {
         transform-origin: 17% 89%; /* the handle's tip */
