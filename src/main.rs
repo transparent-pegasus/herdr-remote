@@ -3,6 +3,7 @@ mod herdr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
@@ -37,25 +38,24 @@ impl TranscriptIdentity {
     }
 }
 
-enum CachedTranscript {
-    /// The token lets close or a newer identity invalidate work outside the map lock.
-    Resolving(Arc<()>),
-    Ready(Arc<Mutex<Transcript>>),
+struct CacheEntry {
+    identity: TranscriptIdentity,
+    ticket: u64,
+    transcript: Arc<Mutex<Transcript>>,
 }
 
-type CacheEntry = (TranscriptIdentity, CachedTranscript);
-type Cache = Arc<Mutex<HashMap<String, CacheEntry>>>;
+#[derive(Default)]
+struct TranscriptCache {
+    entries: HashMap<String, CacheEntry>,
+    last_close: HashMap<String, u64>,
+}
 
-fn owns_resolution(
-    entry: Option<&CacheEntry>,
-    identity: &TranscriptIdentity,
-    ticket: &Arc<()>,
-) -> bool {
-    matches!(
-        entry,
-        Some((cached, CachedTranscript::Resolving(current)))
-            if cached == identity && Arc::ptr_eq(current, ticket)
-    )
+type Cache = Arc<Mutex<TranscriptCache>>;
+
+static TRANSCRIPT_TICKETS: AtomicU64 = AtomicU64::new(0);
+
+fn next_transcript_ticket() -> u64 {
+    TRANSCRIPT_TICKETS.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The single pane this server has zoomed. A `tokio` mutex, because the
@@ -270,59 +270,56 @@ fn take_window(
     cache: Cache,
     key: String,
     identity: TranscriptIdentity,
+    ticket: u64,
     home: std::path::PathBuf,
     before: Option<u64>,
     limit: usize,
 ) -> anyhow::Result<Option<(String, Vec<transcript::Message>, bool)>> {
-    let (cached, ticket) = {
-        let mut map = cache
+    let cached = {
+        let map = cache
             .lock()
             .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
-        match map.get(&key) {
-            Some((cached, CachedTranscript::Ready(transcript))) if *cached == identity => {
-                (Some(Arc::clone(transcript)), None)
-            }
-            Some((cached, CachedTranscript::Resolving(_))) if *cached == identity => {
-                return Ok(None);
-            }
-            _ => {
-                let ticket = Arc::new(());
-                map.insert(
-                    key.clone(),
-                    (
-                        identity.clone(),
-                        CachedTranscript::Resolving(Arc::clone(&ticket)),
-                    ),
-                );
-                (None, Some(ticket))
-            }
-        }
+        map.entries
+            .get(&key)
+            .filter(|entry| entry.identity == identity)
+            .map(|entry| Arc::clone(&entry.transcript))
     };
     let entry = match cached {
         Some(entry) => entry,
         None => {
-            let ticket = ticket.expect("an uncached resolution has a ticket");
-            let Some(source) = transcript::resolve(&identity.pane(), &home) else {
-                let mut map = cache
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
-                if owns_resolution(map.get(&key), &identity, &ticket) {
-                    map.remove(&key);
-                }
-                return Ok(None);
-            };
-            let entry = Arc::new(Mutex::new(Transcript::open(source)));
+            let resolved = transcript::resolve(&identity.pane(), &home)
+                .map(Transcript::open)
+                .map(Mutex::new)
+                .map(Arc::new);
             let mut map = cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
-            if !owns_resolution(map.get(&key), &identity, &ticket) {
+            if map
+                .last_close
+                .get(&key)
+                .is_some_and(|last_close| *last_close > ticket)
+            {
                 return Ok(None);
             }
-            map.insert(
-                key.clone(),
-                (identity, CachedTranscript::Ready(Arc::clone(&entry))),
-            );
-            entry
+            match map.entries.get(&key) {
+                Some(cached) if cached.ticket > ticket || cached.identity == identity => {
+                    Arc::clone(&cached.transcript)
+                }
+                _ => {
+                    let Some(entry) = resolved else {
+                        return Ok(None);
+                    };
+                    map.entries.insert(
+                        key.clone(),
+                        CacheEntry {
+                            identity,
+                            ticket,
+                            transcript: Arc::clone(&entry),
+                        },
+                    );
+                    entry
+                }
+            }
         }
     };
     let mut transcript = entry
@@ -335,12 +332,11 @@ fn take_window(
                 .lock()
                 .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
             if map
+                .entries
                 .get(&key)
-                .is_some_and(|(_, cached)| {
-                    matches!(cached, CachedTranscript::Ready(cached) if Arc::ptr_eq(cached, &entry))
-                })
+                .is_some_and(|cached| Arc::ptr_eq(&cached.transcript, &entry))
             {
-                map.remove(&key);
+                map.entries.remove(&key);
             }
             return Ok(None);
         }
@@ -359,6 +355,7 @@ async fn transcript_route(
     Query(query): Query<TranscriptWindow>,
     headers: header::HeaderMap,
 ) -> ApiResult<Response> {
+    let ticket = next_transcript_ticket();
     let context = herdr::pane_context(&pane_id)
         .await
         .map_err(failed("could not read the herdr session"))?
@@ -377,17 +374,18 @@ async fn transcript_route(
     let cache = state.transcripts.clone();
     let key = pane_id.clone();
     let home = transcript::home();
-    let taken =
-        tokio::task::spawn_blocking(move || take_window(cache, key, identity, home, before, limit))
-            .await
-            .map_err(|error| {
-                eprintln!("transcript task failed: {error}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "could not read the transcript",
-                )
-            })?
-            .map_err(failed("could not read the transcript"))?;
+    let taken = tokio::task::spawn_blocking(move || {
+        take_window(cache, key, identity, ticket, home, before, limit)
+    })
+    .await
+    .map_err(|error| {
+        eprintln!("transcript task failed: {error}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read the transcript",
+        )
+    })?
+    .map_err(failed("could not read the transcript"))?;
     let Some((version, messages, has_more)) = taken else {
         return Err((StatusCode::NOT_FOUND, "no transcript for this pane"));
     };
@@ -466,16 +464,17 @@ async fn close(
     State(state): State<AppState>,
     Path(pane_id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    state
-        .transcripts
-        .lock()
-        .map_err(|_| {
+    let ticket = next_transcript_ticket();
+    {
+        let mut cache = state.transcripts.lock().map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "could not release the transcript",
             )
-        })?
-        .remove(&pane_id);
+        })?;
+        cache.entries.remove(&pane_id);
+        cache.last_close.insert(pane_id.clone(), ticket);
+    }
     let mut slot = state.zoomed.0.lock().await;
     if slot.as_deref() != Some(pane_id.as_str()) {
         return Ok(StatusCode::NO_CONTENT);
@@ -749,14 +748,28 @@ mod tests {
         source: transcript::Source,
     ) -> Arc<Mutex<Transcript>> {
         let transcript = Arc::new(Mutex::new(Transcript::open(source)));
-        cache.lock().unwrap().insert(
+        cache.lock().unwrap().entries.insert(
             key.into(),
-            (
-                identity.clone(),
-                CachedTranscript::Ready(Arc::clone(&transcript)),
-            ),
+            CacheEntry {
+                identity: identity.clone(),
+                ticket: next_transcript_ticket(),
+                transcript: Arc::clone(&transcript),
+            },
         );
         transcript
+    }
+
+    fn is_cached(cache: &Cache, key: &str) -> bool {
+        cache.lock().unwrap().entries.contains_key(key)
+    }
+
+    fn cached_identity(cache: &Cache, key: &str) -> Option<TranscriptIdentity> {
+        cache
+            .lock()
+            .unwrap()
+            .entries
+            .get(key)
+            .map(|entry| entry.identity.clone())
     }
 
     fn scratch_home(label: &str) -> std::path::PathBuf {
@@ -823,6 +836,19 @@ mod tests {
         (opened_rx, write_tx, writer)
     }
 
+    fn write_codex_meta(home: &std::path::Path, name: &str) {
+        let path = home.join(".codex/sessions/2026/09/01").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "{}\n",
+                serde_json::json!({ "type": "session_meta", "payload": { "cwd": "/repo" } })
+            ),
+        )
+        .unwrap();
+    }
+
     fn newest_text(
         cache: &Cache,
         identity: &TranscriptIdentity,
@@ -832,6 +858,7 @@ mod tests {
             cache.clone(),
             "pane".into(),
             identity.clone(),
+            next_transcript_ticket(),
             home.to_path_buf(),
             None,
             30,
@@ -859,13 +886,14 @@ mod tests {
             cache.clone(),
             "pane".into(),
             identity,
+            next_transcript_ticket(),
             std::path::PathBuf::new(),
             None,
             30,
         );
 
         assert!(result.is_err());
-        assert!(cache.lock().unwrap().contains_key("pane"));
+        assert!(is_cached(&cache, "pane"));
     }
 
     #[test]
@@ -884,13 +912,14 @@ mod tests {
             cache.clone(),
             "pane".into(),
             identity,
+            next_transcript_ticket(),
             std::path::PathBuf::new(),
             None,
             30,
         );
 
         assert!(matches!(result, Ok(None)));
-        assert!(!cache.lock().unwrap().contains_key("pane"));
+        assert!(!is_cached(&cache, "pane"));
     }
 
     #[test]
@@ -935,6 +964,7 @@ mod tests {
                 cache.clone(),
                 "pane".into(),
                 identity.clone(),
+                next_transcript_ticket(),
                 home.clone(),
                 None,
                 30,
@@ -944,10 +974,18 @@ mod tests {
         );
 
         std::fs::remove_file(path).unwrap();
-        let result = take_window(cache.clone(), "pane".into(), identity, home, None, 30);
+        let result = take_window(
+            cache.clone(),
+            "pane".into(),
+            identity,
+            next_transcript_ticket(),
+            home,
+            None,
+            30,
+        );
 
         assert!(matches!(result, Ok(None)), "{result:?}");
-        assert!(!cache.lock().unwrap().contains_key("pane"));
+        assert!(!is_cached(&cache, "pane"));
     }
 
     #[test]
@@ -969,6 +1007,7 @@ mod tests {
                 worker_cache,
                 "busy".into(),
                 identity,
+                next_transcript_ticket(),
                 std::path::PathBuf::new(),
                 None,
                 30,
@@ -1057,7 +1096,122 @@ mod tests {
             close(State(state.clone()), Path("pane".into())).await,
             Ok(StatusCode::NO_CONTENT)
         );
-        assert!(!state.transcripts.lock().unwrap().contains_key("pane"));
+        assert!(!is_cached(&state.transcripts, "pane"));
+    }
+
+    #[tokio::test]
+    async fn a_close_after_request_ticket_prevents_cache_reinsertion() {
+        let home = scratch_home("close-after-ticket");
+        write_claude(&home, "session.jsonl", "stale");
+        let state = AppState::default();
+        let identity = transcript_identity();
+        let request_ticket = next_transcript_ticket();
+
+        assert_eq!(
+            close(State(state.clone()), Path("pane".into())).await,
+            Ok(StatusCode::NO_CONTENT)
+        );
+        let result = take_window(
+            state.transcripts.clone(),
+            "pane".into(),
+            identity,
+            request_ticket,
+            home,
+            None,
+            30,
+        );
+
+        assert!(matches!(result, Ok(None)));
+        assert!(!is_cached(&state.transcripts, "pane"));
+    }
+
+    #[test]
+    fn an_older_request_ticket_cannot_replace_a_newer_identity() {
+        let home = scratch_home("older-request-ticket");
+        write_claude(&home, "session.jsonl", "ready");
+        let cache = Cache::default();
+        let old_identity = transcript_identity();
+        let old_ticket = next_transcript_ticket();
+        let new_identity = TranscriptIdentity {
+            title: Some("new identity".into()),
+            ..transcript_identity()
+        };
+        let new_ticket = next_transcript_ticket();
+
+        assert!(
+            take_window(
+                cache.clone(),
+                "pane".into(),
+                new_identity.clone(),
+                new_ticket,
+                home.clone(),
+                None,
+                30,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            take_window(
+                cache.clone(),
+                "pane".into(),
+                old_identity,
+                old_ticket,
+                home,
+                None,
+                30,
+            )
+            .unwrap()
+            .is_some()
+        );
+
+        assert!(cached_identity(&cache, "pane").as_ref() == Some(&new_identity));
+    }
+
+    #[test]
+    fn concurrent_cold_requests_for_one_pane_both_receive_a_transcript() {
+        let home = scratch_home("concurrent-cold-requests");
+        let cache = Cache::default();
+        let identity = TranscriptIdentity {
+            agent: "codex".into(),
+            ..transcript_identity()
+        };
+        let old_ticket = next_transcript_ticket();
+        let old_cache = cache.clone();
+        let old_identity = identity.clone();
+        let old_home = home.clone();
+        let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
+        let old = std::thread::spawn(move || {
+            take_window(
+                old_cache,
+                "pane".into(),
+                old_identity,
+                old_ticket,
+                old_home,
+                None,
+                30,
+            )
+        });
+
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        write_codex_meta(&home, "rollout-2026-09-01T01-00-00-new.jsonl");
+        let newer = take_window(
+            cache,
+            "pane".into(),
+            identity,
+            next_transcript_ticket(),
+            home,
+            None,
+            30,
+        );
+        write_tx.send(()).unwrap();
+        writer.join().unwrap();
+        let older = old.join().unwrap();
+
+        assert!(older.unwrap().is_some());
+        assert!(newer.unwrap().is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1071,7 +1225,15 @@ mod tests {
         };
         let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
         let worker = std::thread::spawn(move || {
-            take_window(worker_cache, "pane".into(), identity, home, None, 30)
+            take_window(
+                worker_cache,
+                "pane".into(),
+                identity,
+                next_transcript_ticket(),
+                home,
+                None,
+                30,
+            )
         });
 
         opened_rx
@@ -1085,7 +1247,7 @@ mod tests {
         writer.join().unwrap();
 
         assert!(matches!(worker.join().unwrap(), Ok(None)));
-        assert!(!state.transcripts.lock().unwrap().contains_key("pane"));
+        assert!(!is_cached(&state.transcripts, "pane"));
     }
 
     #[test]
@@ -1100,7 +1262,15 @@ mod tests {
         let old_home = home.clone();
         let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
         let old = std::thread::spawn(move || {
-            take_window(old_cache, "pane".into(), old_identity, old_home, None, 30)
+            take_window(
+                old_cache,
+                "pane".into(),
+                old_identity,
+                next_transcript_ticket(),
+                old_home,
+                None,
+                30,
+            )
         });
 
         opened_rx
@@ -1115,14 +1285,8 @@ mod tests {
         write_tx.send(()).unwrap();
         writer.join().unwrap();
 
-        assert!(matches!(old.join().unwrap(), Ok(None)));
-        assert!(
-            cache
-                .lock()
-                .unwrap()
-                .get("pane")
-                .is_some_and(|(identity, _)| identity == &new_identity)
-        );
+        assert!(old.join().unwrap().unwrap().is_some());
+        assert!(cached_identity(&cache, "pane").as_ref() == Some(&new_identity));
     }
 
     #[test]
