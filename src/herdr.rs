@@ -17,7 +17,29 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// A stalled peer must not be able to grow the read buffer without bound.
 const MAX_FRAME: u64 = 4 << 20;
 
+#[cfg(test)]
+static TEST_SOCKET_PATH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) struct TestSocketPath(Option<String>);
+
+#[cfg(test)]
+impl Drop for TestSocketPath {
+    fn drop(&mut self) {
+        *TEST_SOCKET_PATH.lock().unwrap() = self.0.take();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn use_test_socket(path: String) -> TestSocketPath {
+    TestSocketPath(TEST_SOCKET_PATH.lock().unwrap().replace(path))
+}
+
 fn socket_path() -> String {
+    #[cfg(test)]
+    if let Some(path) = TEST_SOCKET_PATH.lock().unwrap().clone() {
+        return path;
+    }
     std::env::var("HERDR_SOCKET_PATH").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_default();
         format!("{home}/.config/herdr/herdr.sock")
@@ -94,6 +116,16 @@ struct TabInfo {
     label: String,
 }
 
+/// What an agent reported about its own session. Self-reported, hence the
+/// boundary in `transcript::guard`.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct AgentSession {
+    pub source: String,
+    pub agent: String,
+    pub kind: String,
+    pub value: String,
+}
+
 #[derive(Deserialize)]
 struct PaneInfo {
     pane_id: String,
@@ -103,6 +135,8 @@ struct PaneInfo {
     label: Option<String>,
     title: Option<String>,
     terminal_title_stripped: Option<String>,
+    agent_session: Option<AgentSession>,
+    cwd: Option<String>,
 }
 
 // --- what we expose, so a herdr schema change need not reach the phone ---
@@ -196,6 +230,41 @@ pub async fn session() -> Result<Session> {
     Ok(to_session(snapshot().await?))
 }
 
+/// What the transcript layer needs to find this pane's session file. `title`
+/// prefers the stripped terminal title, which is what cursor's own chat titles
+/// are matched against.
+pub struct PaneContext {
+    pub agent: Option<String>,
+    pub session: Option<AgentSession>,
+    pub cwd: String,
+    pub title: Option<String>,
+}
+
+pub async fn pane_context(pane_id: &str) -> Result<Option<PaneContext>> {
+    Ok(snapshot()
+        .await?
+        .panes
+        .into_iter()
+        .find(|pane| pane.pane_id == pane_id)
+        .map(|pane| PaneContext {
+            agent: pane.agent.clone(),
+            session: pane.agent_session.clone(),
+            cwd: pane.cwd.clone().unwrap_or_default(),
+            title: pane
+                .terminal_title_stripped
+                .clone()
+                .or_else(|| pane.title.clone()),
+        }))
+}
+
+/// A pane rendered into twenty columns destroys anything it draws. Zooming
+/// hands it the whole herdr window instead — as wide as the operator keeps that
+/// window, which is all this can do and why nothing here expects a width.
+pub async fn zoom(pane_id: &str, on: bool) -> Result<()> {
+    call("pane.zoom", json!({ "pane_id": pane_id, "zoomed": on })).await?;
+    Ok(())
+}
+
 /// `truncated` means herdr had more scrollback than `lines` asked for, which is
 /// what lets the phone offer to reach further back.
 #[derive(Deserialize)]
@@ -272,6 +341,38 @@ pub async fn prompt(pane_id: &str, text: &str) -> Result<Option<()>> {
 }
 
 #[cfg(test)]
+pub(crate) fn fake_herdr(
+    replies: Vec<&'static [u8]>,
+) -> (String, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::net::UnixListener;
+
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "herdr-remote-recording-test-{}-{n}.sock",
+        std::process::id()
+    ));
+    let path = path.to_str().unwrap().to_string();
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    let socket = path.clone();
+    let (sent, received) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        for reply in replies {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut connection = BufReader::new(stream);
+            let mut request = String::new();
+            connection.read_line(&mut request).await.unwrap();
+            let _ = sent.send(serde_json::from_str(&request).unwrap());
+            connection.get_mut().write_all(reply).await.unwrap();
+        }
+        let _ = std::fs::remove_file(&socket);
+    });
+    (path, received)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -305,28 +406,10 @@ mod tests {
         .unwrap()
     }
 
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use tokio::net::UnixListener;
-
     /// A herdr that accepts one connection, reads the request, replies with
     /// fixed bytes, hangs up, and removes its socket.
     fn fake_herdr(reply: &'static [u8]) -> String {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("herdr-remote-test-{}-{n}.sock", std::process::id()));
-        let path = path.to_str().unwrap().to_string();
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
-        let socket = path.clone();
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            let _ = stream.read(&mut request).await;
-            stream.write_all(reply).await.unwrap();
-            drop(stream);
-            let _ = std::fs::remove_file(&socket);
-        });
+        let (path, _) = super::fake_herdr(vec![reply]);
         path
     }
 
@@ -379,6 +462,48 @@ mod tests {
         let path = fake_herdr(b"{\"id\":\"herdr-remote\"}\n");
         let error = probe(&path).await.unwrap_err();
         assert!(error.to_string().contains("herdr ping returned no result"));
+    }
+
+    #[test]
+    fn a_pane_carries_its_session_and_cwd() {
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "workspaces": [], "tabs": [],
+            "panes": [{
+                "pane_id": "w1:p1", "tab_id": "w1:t1", "agent": "claude",
+                "agent_status": "working", "cwd": "/repo",
+                "title": "raw", "terminal_title_stripped": "stripped",
+                "agent_session": { "source": "herdr:claude", "agent": "claude",
+                                   "kind": "id", "value": "abc" }
+            }]
+        }))
+        .unwrap();
+        let pane = &snapshot.panes[0];
+        assert_eq!(pane.cwd.as_deref(), Some("/repo"));
+        let session = pane.agent_session.clone().unwrap();
+        assert_eq!(
+            session,
+            AgentSession {
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                kind: "id".into(),
+                value: "abc".into(),
+            }
+        );
+    }
+
+    /// Most panes report no session at all — measured with four agents running
+    /// in one tab, grok reported none and codex reported none until it had
+    /// taken a turn — so the field must stay optional all the way through.
+    #[test]
+    fn a_pane_without_a_session_still_parses() {
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "workspaces": [], "tabs": [],
+            "panes": [{ "pane_id": "w1:p2", "tab_id": "w1:t1",
+                        "agent": "grok", "agent_status": "idle" }]
+        }))
+        .unwrap();
+        assert!(snapshot.panes[0].agent_session.is_none());
+        assert!(snapshot.panes[0].cwd.is_none());
     }
 
     #[test]

@@ -30,8 +30,52 @@
     <noscript>This page needs JavaScript to list panes and send prompts.</noscript>
     <p id="status" role="status"></p>
     <div id="list"></div>
-    <button id="more" type="button" hidden>Load earlier output</button>
-    <pre id="log" hidden></pre>
+    <div id="logarea">
+      <button id="more" type="button" hidden aria-label="Load earlier">
+        <svg viewBox="0 0 24 24" aria-hidden="true"
+          ><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1.06 6.74 2.74L21 8" /><path
+            d="M21 3v5h-5"
+        /></svg>
+      </button>
+      <ol id="transcript" hidden></ol>
+      <pre id="log" hidden></pre>
+    </div>
+    <dialog id="full">
+      <div class="body" tabindex="-1"></div>
+      <button id="full-close" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+        </svg>
+      </button>
+    </dialog>
+    <div id="live" hidden>
+      <span id="beat" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-label="working"><g>
+          <path d="m14 13-8.381 8.38a1 1 0 0 1-3.001-3l8.384-8.381"/>
+          <path d="m16 16 6-6"/><path d="m21.5 10.5-8-8"/>
+          <path d="m8 8 6-6"/><path d="m8.5 7.5 8 8"/>
+        </g></svg>
+      </span>
+      <span id="draft"></span>
+      <button id="expand" type="button" aria-label="Watch the pane">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+      </button>
+    </div>
+    <dialog id="screen">
+      <div class="body" tabindex="-1"><pre></pre></div>
+      <button id="screen-close" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+        </svg>
+      </button>
+    </dialog>
 
     <form id="composer">
       <label for="text" id="target"></label>
@@ -112,11 +156,18 @@
 
     <script>
       import {
+        closePane,
+        fetchAgentTick,
         fetchOutput,
         fetchSession,
+        fetchTranscript,
+        forgetPane,
         isTransient,
         interruptPane,
+        type Live,
+        openPane,
         paneSubtitle,
+        paneTitle,
         pressArrow,
         pressEnter,
         sendPrompt,
@@ -129,6 +180,17 @@
         type Workspace,
       } from "../lib/api";
       import { href, parseRoute, type Route } from "../lib/route";
+      import {
+        agentRawState,
+        type Card,
+        following,
+        modalContent,
+        prepend,
+        replaceTail,
+        type Sent,
+        sentCard,
+        settle,
+      } from "../lib/transcript";
 
       const listEl = document.querySelector<HTMLDivElement>("#list")!;
       const logEl = document.querySelector<HTMLPreElement>("#log")!;
@@ -148,6 +210,191 @@
       const upEl = document.querySelector<HTMLButtonElement>("#up")!;
       const downEl = document.querySelector<HTMLButtonElement>("#down")!;
       const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
+      const transcriptEl =
+        document.querySelector<HTMLOListElement>("#transcript")!;
+      const fullEl = document.querySelector<HTMLDialogElement>("#full")!;
+      const fullBodyEl = fullEl.querySelector<HTMLDivElement>(".body")!;
+
+      let cards: Card[] = [];
+      let sent: Sent[] = [];
+      let paintedCards: Card[] = [];
+      let paintedSent: Sent[] = [];
+      /** What the list is showing: the transcript's own cards, then whatever
+       *  was sent from here and the agent has not written down yet. */
+      let shown: Card[] = [];
+
+      function cardEl(card: Card) {
+        const item = document.createElement("li");
+        item.dataset.role = card.role;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.seq = String(card.seq);
+        const preview = document.createElement("p");
+        preview.className = "preview";
+        // textContent: a preview is the speaker's words, not our markup.
+        preview.textContent = card.preview;
+        button.append(preview);
+        item.append(button);
+        return item;
+      }
+
+      /** Rebuild only when the merge produced a different array. Thirty nodes is
+       *  cheap; yanking the reader's scroll position every three seconds is not. */
+      function paintCards() {
+        if (cards === paintedCards && sent === paintedSent) return;
+        const follow = following(
+          transcriptEl.scrollTop,
+          transcriptEl.clientHeight,
+          transcriptEl.scrollHeight,
+        );
+        const top = transcriptEl.scrollTop;
+        shown = [...cards, ...sent.map(sentCard)];
+        transcriptEl.replaceChildren(moreEl, ...shown.map(cardEl));
+        paintedCards = cards;
+        paintedSent = sent;
+        transcriptEl.scrollTop = follow ? transcriptEl.scrollHeight : top;
+      }
+
+      /** Keep our own copy of what we just sent, against the transcript as it
+       *  stands, so it can be shown until the agent's file catches up. */
+      function remember(text: string) {
+        sent = [...sent, { after: cards.at(-1)?.seq ?? 0, text }];
+        paintCards();
+        // Sending is deliberate, so it goes to the end of the list whatever
+        // paintCards decided from where the reader had scrolled to.
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      }
+
+      /** The control rides at the top of whichever view is scrolling. The card
+       *  list can hold it as a child; the raw log is a single text node that
+       *  `paint()` replaces, so there it sits directly above instead. */
+      function parkMore(inTranscript: boolean) {
+        const home = inTranscript ? transcriptEl : logareaEl;
+        if (moreEl.parentElement !== home) home.prepend(moreEl);
+      }
+
+      // The agent's HTML was rendered by the server, which escapes raw HTML and
+      // strips dangerous link and image schemes; the user's own text arrives escaped
+      // by the same server, so both are safe to assign and neither is re-escaped.
+      function openCard(card: Card) {
+        const { wrap, html } = modalContent(card);
+        fullBodyEl.classList.toggle("wrap", wrap);
+        fullBodyEl.innerHTML = html;
+        fullBodyEl.scrollTop = 0;
+        sizeSheets();
+        // showModal(): reading a message is a detour from driving the pane, so
+        // the controls below go inert the way they are outside a pane. Escape
+        // and the focus trap come with it.
+        fullEl.showModal();
+        fullBodyEl.focus();
+      }
+
+      transcriptEl.addEventListener("click", (event) => {
+        const button = (event.target as Element | null)?.closest<HTMLButtonElement>(
+          "button[data-seq]",
+        );
+        const seq = Number(button?.dataset.seq);
+        const card = shown.find((candidate) => candidate.seq === seq);
+        if (card) openCard(card);
+      });
+
+      document
+        .querySelector<HTMLButtonElement>("#full-close")!
+        .addEventListener("click", () => fullEl.close());
+
+      const liveEl = document.querySelector<HTMLDivElement>("#live")!;
+      const draftEl = document.querySelector<HTMLSpanElement>("#draft")!;
+      const beatEl = document.querySelector<HTMLSpanElement>("#beat")!;
+      const expandEl = document.querySelector<HTMLButtonElement>("#expand")!;
+      const screenEl = document.querySelector<HTMLDialogElement>("#screen")!;
+      const screenViewEl = screenEl.querySelector<HTMLDivElement>(".body")!;
+      const screenBodyEl = screenEl.querySelector<HTMLPreElement>("pre")!;
+      const screenCloseEl =
+        document.querySelector<HTMLButtonElement>("#screen-close")!;
+
+      let screenText = "";
+
+      /** Both sheets end where the composer begins, and so does the veil. */
+      function sizeSheets() {
+        document.documentElement.style.setProperty(
+          "--composer-h",
+          `${composerEl.getBoundingClientRect().height}px`,
+        );
+      }
+
+      /** `clientWidth` and `clientHeight` carry the padding, and a screen
+       *  scaled against those loses that much off its right and bottom. */
+      function contentBox(el: HTMLElement) {
+        const style = getComputedStyle(el);
+        const shrink = (size: number, a: string, b: string) =>
+          size - parseFloat(a) - parseFloat(b);
+        return {
+          width: shrink(el.clientWidth, style.paddingLeft, style.paddingRight),
+          height: shrink(el.clientHeight, style.paddingTop, style.paddingBottom),
+        };
+      }
+
+      /** Scaled, not scrolled: the screen is a grid of characters whose boxes
+       *  wrapping would break, and the reader wants the whole of it at once. */
+      function fitScreen() {
+        if (!screenEl.open) return;
+        screenBodyEl.style.setProperty("--fit", "1");
+        const box = contentBox(screenViewEl);
+        const scale = Math.min(
+          box.width / (screenBodyEl.scrollWidth || 1),
+          box.height / (screenBodyEl.scrollHeight || 1),
+          1,
+        );
+        screenBodyEl.style.setProperty("--fit", String(scale));
+      }
+
+      function paintLive(live: Live, state: string) {
+        draftEl.textContent = live.composer;
+        beatEl.hidden = state !== "working";
+        screenText = live.screen;
+        if (screenEl.open && screenBodyEl.textContent !== live.screen) {
+          screenBodyEl.textContent = live.screen;
+          fitScreen();
+        }
+      }
+
+      /** Leaving a pane must not leave its draft, its screen, or its animation behind
+       *  for the next one to show for a tick. */
+      function resetLive() {
+        draftEl.textContent = "";
+        beatEl.hidden = true;
+        screenText = "";
+        screenBodyEl.textContent = "";
+        if (screenEl.open) screenEl.close();
+      }
+
+      // The screen is where a /model picker lives: it never reaches the transcript,
+      // and the pane's status stays `idle` while one is open, so the button is
+      // offered in every state rather than gated on `blocked`.
+      expandEl.addEventListener("click", () => {
+        screenBodyEl.textContent = screenText;
+        sizeSheets();
+        // show(), not showModal(): a picker on the screen is answered with the
+        // controls below it, which a modal would make inert.
+        screenEl.show();
+        screenViewEl.focus();
+        fitScreen();
+      });
+
+      screenCloseEl.addEventListener("click", () => screenEl.close());
+
+      // A non-modal dialog gets no Escape handling of its own.
+      addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && screenEl.open) screenEl.close();
+      });
+
+      // A rotation or an on-screen keyboard moves the composer and changes what
+      // fits; both sheets are measured against it.
+      addEventListener("resize", () => {
+        if (!fullEl.open && !screenEl.open) return;
+        sizeSheets();
+        fitScreen();
+      });
 
       const POLL_MS = 3000;
       /** The session is smaller and changes slower than pane output. */
@@ -158,7 +405,7 @@
 
       let session: Session | null = null;
       let watching: string | null = null;
-      let timer: ReturnType<typeof setInterval> | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       let sessionJson = "";
       let loading = false;
       let sessionFailed = false;
@@ -245,51 +492,115 @@
         logEl.scrollTop = following ? logEl.scrollHeight : top;
       }
 
-      /** Poll the open pane's output; one pane is watched at a time. */
-      function watch(pane: Pane | null) {
-        clearInterval(timer);
+      async function watch(pane: Pane | null) {
+        const token = ++watches;
+        clearTimeout(timer);
+        if (watching && watching !== pane?.id) closePane(watching);
         watching = pane?.id ?? null;
-        // Each pane starts from the small window; widening is per visit.
-        lines = LINES;
+        cards = [];
+        sent = [];
+        paintedCards = [];
+        paintedSent = [];
+        shown = [];
         painted = "";
+        logEl.textContent = "";
+        lines = LINES;
+        transcriptEl.replaceChildren(moreEl);
+        transcriptEl.hidden = true;
+        logEl.hidden = true;
+        liveEl.hidden = true;
         moreEl.hidden = true;
+        resetLive();
         if (!pane) return;
 
-        const mine = ++watches;
-        const tick = async () => {
-          if (document.hidden) return; // a backgrounded phone tab polls nothing
-          try {
+        forgetPane(pane.id);
+        liveEl.hidden = !pane.agent;
+        await openPane(pane.id).catch(() => {});
+        if (token !== watches) return;
+
+        const loop = async () => {
+          if (!document.hidden) {
+            try {
+              await tick(token);
+              if (token !== watches) return;
+              if (statusEl.classList.contains("error")) say("");
+            } catch (error) {
+              if (token !== watches) return;
+              complain(error, "could not read the pane");
+            }
+          }
+          if (token === watches) timer = setTimeout(loop, POLL_MS);
+        };
+        void loop();
+      }
+
+      async function tick(token: number) {
+        // The session poll replaces the pane object as its state and agent change,
+        // and `render()` does not restart a watch whose id is unchanged.
+        const pane = current().pane;
+        if (!pane || token !== watches) return;
+
+        const polled = pane.agent
+          ? await fetchAgentTick(
+              pane.id,
+              () => AbortSignal.timeout(15000),
+              () => token === watches,
+              (live) => {
+                if (live) paintLive(live, pane.state);
+                liveEl.hidden = false;
+              },
+            )
+          : { live: undefined, liveError: undefined, page: null };
+        if (polled === null) return;
+        const { live, liveError, page } = polled;
+        if (!pane.agent) liveEl.hidden = true;
+        if (token !== watches) return;
+
+        if (page !== null) {
+          transcriptEl.hidden = false;
+          parkMore(true);
+          logEl.hidden = true;
+          if (page !== "unchanged") {
+            cards = replaceTail(cards, page.messages);
+            sent = settle(sent, cards);
+            paintCards();
+            moreEl.hidden = !page.has_more;
+          }
+        } else {
+          // Raw output: an agent pane keeps the visible screen, whose redraw history
+          // does not churn, and a shell keeps its scrollback.
+          cards = [];
+          transcriptEl.hidden = true;
+          if (pane.agent) {
+            const raw = agentRawState(live?.screen);
+            if (raw) {
+              paint(raw.text);
+              logEl.hidden = raw.hidden;
+            }
+            moreEl.hidden = true;
+          } else {
+            logEl.hidden = false;
+            parkMore(false);
             const output = await fetchOutput(
               pane.id,
               lines,
-              // An agent redraws its screen in place: asking for scrollback
-              // there returns redraw history that differs on every read, so the
-              // log would never settle. Its screen is all it has anyway.
-              // Read it fresh rather than from the pane this watch started on:
-              // attaching an agent to the pane already open is an ordinary
-              // move, and the session poll sees it while the id never changes.
-              current().pane?.agent ? "screen" : "scrollback",
+              "scrollback",
               AbortSignal.timeout(15000),
             );
-            if (mine !== watches) return; // a later pane already owns the view
+            if (token !== watches) return;
             paint(output.text);
-            // An agent pane in a full-screen TUI keeps no scrollback, so this
-            // stays hidden there however far back the window reaches.
             moreEl.hidden = !output.truncated || lines >= MAX_LINES;
-            // The interval keeps running through a failure, so the recovery is
-            // what has to clear the warning it left behind.
-            if (statusEl.classList.contains("error")) say("");
-          } catch (error) {
-            if (mine !== watches) return;
-            // Keep polling a pane that is merely slow; a closed one shows up as
-            // gone on the next session reload.
-            complain(error, "Could not read.");
           }
-        };
-        logEl.textContent = "";
-        tick();
-        timer = setInterval(tick, POLL_MS);
+        }
+
+        // The transcript is the durable surface, so a failed live read is
+        // reported only after the transcript request had its chance to paint.
+        if (liveError !== undefined) throw liveError;
       }
+
+      addEventListener("pagehide", () => {
+        if (watching) closePane(watching);
+      });
 
       /** The URL is the state: everything on screen is derived from it. */
       function render() {
@@ -315,8 +626,9 @@
           return;
         }
 
-        headingEl.textContent =
-          pane?.label ?? tab?.label ?? workspace?.label ?? "Herdr Remote";
+        headingEl.textContent = pane
+          ? paneTitle(pane)
+          : (tab?.label ?? workspace?.label ?? "Herdr Remote");
         backEl.hidden = !workspace;
         backEl.href = pane
           ? href({ workspaceId: workspace!.id, tabId: tab!.id })
@@ -325,7 +637,7 @@
             : "/";
 
         listEl.hidden = pane !== null;
-        logEl.hidden = pane === null;
+        if (!pane) { logEl.hidden = true; transcriptEl.hidden = true; }
         if (!pane) {
           listEl.replaceChildren(
             ...(tab
@@ -347,11 +659,14 @@
           );
         }
         if ((pane?.id ?? null) !== watching) {
-          watch(pane);
+          void watch(pane);
           if (pane) textEl.focus();
         }
 
-        targetEl.textContent = pane ? paneSubtitle(pane) : "Pick a pane first.";
+        // Which pane, and what it is doing, are the heading's and the
+        // indicators' job; all this line has left to say is that neither
+        // exists yet.
+        targetEl.textContent = pane ? "" : "Pick a pane first.";
         textEl.disabled = !pane;
         // "go" and "don't stop until completion" are instructions to an agent.
         // A plain shell would run them as a command line, and the apostrophe
@@ -488,12 +803,16 @@
         );
       });
       goEl.addEventListener("click", () =>
-        act(goEl, "go", (id) => sendPrompt(id, "go")),
+        act(goEl, "go", async (id) => {
+          await sendPrompt(id, "go");
+          remember("go");
+        }),
       );
       pushEl.addEventListener("click", () =>
-        act(pushEl, "don't stop until completion", (id) =>
-          sendPrompt(id, "don't stop until completion"),
-        ),
+        act(pushEl, "don't stop until completion", async (id) => {
+          await sendPrompt(id, "don't stop until completion");
+          remember("don't stop until completion");
+        }),
       );
       upEl.addEventListener("click", () =>
         act(upEl, "up", (id) => pressArrow(id, "up")),
@@ -521,15 +840,80 @@
           await sendPrompt(id, text);
           textEl.value = "";
           syncSend();
+          remember(text);
         });
       });
 
       // Reading further back keeps the reader where they are: paint() only
       // follows the tail when they were already at it.
-      moreEl.addEventListener("click", () => {
-        lines = Math.min(lines * 4, MAX_LINES);
-        moreEl.hidden = true;
-        say("Reading further back…");
+      moreEl.addEventListener("click", async () => {
+        const paneId = watching;
+        const token = watches;
+        if (!paneId) return;
+        if (transcriptEl.hidden) {
+          lines = Math.min(lines * 4, MAX_LINES);
+          moreEl.hidden = true;
+          return;
+        }
+        const oldest = cards[0]?.seq;
+        const page = await fetchTranscript(paneId, oldest);
+        if (token !== watches || paneId !== watching) return;
+        if (page === null || page === "unchanged") return;
+        const fromBottom = transcriptEl.scrollHeight - transcriptEl.scrollTop;
+        cards = prepend(page.messages, cards);
+        paintCards();
+        transcriptEl.scrollTop = transcriptEl.scrollHeight - fromBottom;
+        moreEl.hidden = !page.has_more;
+      });
+
+      // On a touch screen the reload control is not a button to find but a drag
+      // from the top of the log: pull down, the icon comes with it, let go past
+      // the threshold and it loads. `overscroll-behavior-y` keeps the browser's
+      // own pull-to-refresh out of the way.
+      const logareaEl = document.querySelector<HTMLDivElement>("#logarea")!;
+      const PULL_LIMIT = 72;
+      const PULL_TRIGGER = 56;
+      let pullFrom: number | null = null;
+      let pulled = 0;
+
+      function pullScroller(): HTMLElement | null {
+        if (!transcriptEl.hidden) return transcriptEl;
+        if (!logEl.hidden) return logEl;
+        return null;
+      }
+
+      logareaEl.addEventListener(
+        "touchstart",
+        (event) => {
+          const scroller = pullScroller();
+          pulled = 0;
+          pullFrom =
+            !moreEl.hidden && scroller !== null && scroller.scrollTop <= 0
+              ? event.touches[0].clientY
+              : null;
+        },
+        { passive: true },
+      );
+
+      logareaEl.addEventListener(
+        "touchmove",
+        (event) => {
+          if (pullFrom === null) return;
+          pulled = Math.max(
+            0,
+            Math.min(PULL_LIMIT, event.touches[0].clientY - pullFrom),
+          );
+          moreEl.style.setProperty("--pull", `${pulled}px`);
+        },
+        { passive: true },
+      );
+
+      logareaEl.addEventListener("touchend", () => {
+        const load = pullFrom !== null && pulled >= PULL_TRIGGER;
+        pullFrom = null;
+        pulled = 0;
+        moreEl.style.removeProperty("--pull");
+        if (load) moreEl.click();
       });
 
       refreshEl.addEventListener("click", () => {
@@ -546,6 +930,16 @@
       :root {
         --edge: color-mix(in srgb, currentColor 15%, transparent);
         --muted: color-mix(in srgb, currentColor 60%, transparent);
+        /* Only the operator's own lane is filled. 5.52:1 against white text,
+           past AA. The agent's lane is the page itself, outlined. */
+        --card-user: #606b69;
+        --full-gap: 1rem;
+      }
+      /* The page owns its overscroll: a downward drag is the transcript's
+         "load earlier" gesture, not the browser's reload. */
+      html,
+      body {
+        overscroll-behavior-y: contain;
       }
       body {
         display: flex;
@@ -553,15 +947,29 @@
         min-height: 100dvh;
         max-height: 100dvh;
         margin: 0 auto;
-        max-width: 34rem;
-        padding: 0 1rem;
+        max-width: 36rem;
         font: 1rem/1.5 system-ui, sans-serif;
       }
+      /* Every child carries the page's 1rem inset itself. On a scrolling one
+         that puts the bar at the page's edge, outside the text, which is the
+         whole reason the padding is not on the body. */
+      noscript {
+        display: block;
+      }
+      header,
+      noscript,
+      #status {
+        padding: 0 1rem;
+      }
+      /* Closed off by the same rule the composer draws, with the same 6px of
+         air on either side of it. */
       header {
         display: flex;
         align-items: center;
         gap: 0.5rem;
         margin: 6px 0;
+        padding-bottom: 6px;
+        border-bottom: 1px solid var(--edge);
       }
       h1 {
         flex: 1;
@@ -584,11 +992,269 @@
         color: inherit;
         font-weight: 600;
       }
+      /* One positioned column for whichever view is showing, so the pull
+         control can sit on its top edge and the hammer on its bottom one. It
+         only claims the column's spare height when it has something to show;
+         otherwise the pane list keeps it. */
+      #logarea {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      #logarea:has(> :not([hidden])) {
+        flex: 1;
+      }
+      /* A reload icon that rides at the very top of the scrolling history, so
+         reaching the oldest card is what brings it into view. A drag from the
+         top on a touch screen turns it as it goes and loads on release. */
+      #more {
+        display: grid;
+        place-items: center;
+        flex: none;
+        width: 100%;
+        /* Air above the icon, and the list's own gap supplying as much below,
+           so the control sits evenly between the edge and the oldest card. */
+        padding: 0.5rem 0 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      #more svg {
+        width: 20px;
+        height: 20px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        transform: rotate(calc(var(--pull, 0px) * 4deg));
+      }
+      #transcript {
+        flex: 1;
+        list-style: none;
+        margin: 0;
+        padding: 0 1rem 0.5rem;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      /* Older WebViews do not mark the UA `[hidden]` rule `!important`, so a
+         `display` of our own would win over it — the same reason `#log[hidden]`
+         already exists below. */
+      #transcript[hidden],
+      #live[hidden],
+      #more[hidden],
+      #beat[hidden] {
+        display: none;
+      }
+      #transcript li {
+        border-radius: 10px;
+      }
+      #transcript li > button {
+        display: block;
+        width: 100%;
+        border: 0;
+        border-radius: inherit;
+        padding: 0.5rem 0.7rem;
+        color: inherit;
+        background: transparent;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      #transcript li[data-role="user"] {
+        margin-left: 15%;
+        background: var(--card-user);
+      }
+      /* Nothing fills the agent's lane: the same 1px the pane rows use is all
+         that separates it from the page. */
+      #transcript li[data-role="assistant"] {
+        border: 1px solid var(--edge);
+        background: transparent;
+      }
+      /* Plain text in one node, which is what lets the clamp cut at three lines and
+         append its ellipsis; markup would give it block children to trip on. */
+      .preview {
+        margin: 0;
+        line-height: 1.6;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
+        overflow: hidden;
+      }
+      /* Both sheets go edge to edge and over the header, with air above and
+         below, and both stop where the composer begins. What differs is who
+         may act while one is open: a message is read with showModal(), which
+         inerts the controls beneath it, and the screen with show(), because a
+         picker on it is answered with those very controls. The only edges
+         either draws are the two the composer already draws. */
+      #full,
+      #screen {
+        position: fixed;
+        top: var(--full-gap);
+        left: 0;
+        right: 0;
+        z-index: 10;
+        box-sizing: border-box;
+        width: auto;
+        height: calc(100dvh - var(--composer-h, 9rem) - var(--full-gap) * 2);
+        max-width: none;
+        max-height: none;
+        flex-direction: column;
+        margin: 0;
+        padding: 0;
+        border-width: 1px 0;
+        border-style: solid;
+        border-color: var(--edge);
+        border-radius: 0;
+        overflow: hidden;
+        background: Canvas;
+        color: inherit;
+      }
+      /* Scoped to [open]: an unscoped display would beat the UA's own
+         `dialog:not([open]) { display: none }` and leave both sheets on. */
+      #full[open],
+      #screen[open] {
+        display: flex;
+      }
+      /* The veil covers what the sheet took over and stops at the controls;
+         the UA backdrop would cover those too. */
+      #full::backdrop {
+        background: transparent;
+      }
+      body:has(dialog[open])::after {
+        position: fixed;
+        inset: 0 0 var(--composer-h, 9rem);
+        z-index: 9;
+        background: rgb(0 0 0 / 0.55);
+        content: "";
+      }
+      /* showModal() does the inerting; this is the matching dim, the one the
+         panel already wears with no pane picked. */
+      body:has(#full[open]) #composer {
+        opacity: 0.55;
+      }
+      /* The close control floats over the foot of the sheet; the padding is
+         the room it needs, inside the scroller so the end of a long message
+         clears it too, and inside the box `fitScreen` measures so a screen is
+         never scaled under it. */
+      #full .body,
+      #screen .body {
+        flex: 1;
+        min-height: 0;
+        padding: 0.5rem 0.75rem 3rem;
+        /* Both sheets park focus on their text rather than on the close
+           control, which is where the dialog focusing steps would put it. */
+        outline: none;
+      }
+      #full .body {
+        overflow: auto;
+        overscroll-behavior: contain;
+      }
+      #full .body.wrap {
+        white-space: pre-wrap;
+      }
+      #full .body pre,
+      #full .body table {
+        display: block;
+        overflow-x: auto;
+      }
+      /* A terminal screen is a fixed grid whose boxes wrapping would break, so
+         it is scaled to whatever fits instead of scrolled. */
+      #screen .body {
+        overflow: hidden;
+      }
+      #screen pre {
+        width: max-content;
+        margin: 0;
+        font: 12px/1.35 ui-monospace, monospace;
+        white-space: pre;
+        transform: scale(var(--fit, 1));
+        transform-origin: top left;
+      }
+      #full-close,
+      #screen-close {
+        position: absolute;
+        right: 0.5rem;
+        bottom: 0.5rem;
+        display: grid;
+        place-items: center;
+        padding: 0.35rem;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      #full-close svg,
+      #screen-close svg {
+        width: 24px;
+        height: 24px;
+      }
+      #live {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.35rem 1rem;
+        border-top: 1px solid var(--edge);
+      }
+      /* One line, ellipsised — the treatment .name and .subtitle already use. */
+      #draft {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: ui-monospace, monospace;
+        opacity: 0.75;
+      }
+      /* The hammer holds the band's left edge and the screen button its right,
+         with the draft between them. */
+      #beat {
+        display: grid;
+        place-items: center;
+        pointer-events: none;
+      }
+      #beat svg {
+        width: 26px;
+        height: 26px;
+        overflow: visible; /* the head leaves the 24-unit box when it swings */
+      }
+      #expand {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      #expand svg {
+        width: 22px;
+        height: 22px;
+      }
+      #beat g {
+        transform-origin: 17% 89%; /* the handle's tip */
+        animation: strike 1.1s ease-in-out infinite;
+      }
+      @keyframes strike {
+        0%, 45% { transform: rotate(-32deg); }
+        62%     { transform: rotate(6deg); }
+        70%     { transform: rotate(-6deg); }
+        78%     { transform: rotate(2deg); }
+        100%    { transform: rotate(-32deg); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #beat g { animation: none; }
+      }
       /* The list and the log scroll; the composer keeps its own space in the
          column, so neither can end up underneath it. */
       #list,
       #log {
         flex: 1;
+        padding: 0 1rem;
         overflow-y: auto;
         overscroll-behavior: contain;
       }
@@ -646,7 +1312,7 @@
         display: grid;
         /* 6px above and below the pane label, matching the header's air. */
         gap: 6px;
-        padding: 6px 0 calc(6px + env(safe-area-inset-bottom));
+        padding: 6px 1rem calc(6px + env(safe-area-inset-bottom));
         border-top: 1px solid var(--edge);
         background: Canvas;
       }
@@ -658,6 +1324,9 @@
       #target {
         font-size: 0.85rem;
         color: var(--muted);
+      }
+      #target:empty {
+        display: none;
       }
       /* Two rows to start, growing with what is typed and capped at five —
          past that it scrolls. field-sizing does the growing; `rows` is the
@@ -757,16 +1426,6 @@
         border-radius: 0.5rem;
         background: none;
         color: inherit;
-      }
-      #more {
-        margin-bottom: 0.5rem;
-        padding: 0.5rem;
-        border: 1px solid var(--edge);
-        border-radius: 0.5rem;
-        background: none;
-        color: inherit;
-        font: inherit;
-        font-size: 0.85rem;
       }
       /* Older WebViews do not mark the UA [hidden] rule !important. */
       #more[hidden],

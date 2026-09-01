@@ -4,11 +4,11 @@
 
 ## Overview
 
-A web application that connects to the herdr session's execution environment via Cloudflare Tunnel to send instructions.
+A web application that connects to the herdr session's execution environment via Cloudflare Tunnel to send instructions, and that reads each agent pane's own transcript file to show its history — a pane running on the alternate screen keeps no scrollback, so the file is the only place its finished answers still exist.
 
 ## Tech Stack
 
-Cloudflare Access + Cloudflare Tunnel + Terraform + cloudflared + systemd + nftables + Rust + TypeScript + Aube + Astro + Vitest + Biome
+Cloudflare Access + Cloudflare Tunnel + Terraform + cloudflared + systemd + nftables + Rust + SQLite + pulldown-cmark + TypeScript + Aube + Astro + Vitest + Biome
 
 ## Development Rules
 

@@ -1,16 +1,96 @@
 mod herdr;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing::get, routing::post};
-use serde::Deserialize;
+use herdr_remote::transcript::{self, Transcript};
+use herdr_remote::{live, markdown};
+use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
 type ApiResult<T> = Result<T, (StatusCode, &'static str)>;
+
+#[derive(Clone, PartialEq, Eq)]
+struct TranscriptIdentity {
+    agent: String,
+    session_kind: Option<String>,
+    session_value: Option<String>,
+    cwd: String,
+    title: Option<String>,
+}
+
+impl TranscriptIdentity {
+    fn pane(&self) -> transcript::PaneRef<'_> {
+        transcript::PaneRef {
+            agent: &self.agent,
+            session_kind: self.session_kind.as_deref(),
+            session_value: self.session_value.as_deref(),
+            cwd: &self.cwd,
+            title: self.title.as_deref(),
+        }
+    }
+}
+
+struct CacheEntry {
+    identity: TranscriptIdentity,
+    ticket: u64,
+    transcript: Arc<Mutex<Transcript>>,
+}
+
+#[derive(Default)]
+struct TranscriptCache {
+    entries: HashMap<String, CacheEntry>,
+    last_close: HashMap<String, u64>,
+}
+
+type Cache = Arc<Mutex<TranscriptCache>>;
+
+static TRANSCRIPT_TICKETS: AtomicU64 = AtomicU64::new(0);
+
+fn next_transcript_ticket() -> u64 {
+    TRANSCRIPT_TICKETS.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The single pane this server has zoomed. A `tokio` mutex, because the
+/// transition awaits herdr while holding it: two concurrent opens must not
+/// trade the slot between each other's zoom calls.
+#[derive(Clone, Default)]
+struct Zoomed(Arc<tokio::sync::Mutex<Option<String>>>);
+
+/// Axum carries one router state, so the two things handlers need travel
+/// together rather than as two `with_state` calls that cannot both exist.
+#[derive(Clone, Default)]
+struct AppState {
+    transcripts: Cache,
+    zoomed: Zoomed,
+}
+
+#[derive(Serialize)]
+struct Card {
+    seq: u64,
+    role: transcript::Role,
+    preview: String,
+    html: String,
+}
+
+#[derive(Serialize)]
+struct TranscriptPage {
+    messages: Vec<Card>,
+    has_more: bool,
+}
+
+#[derive(Deserialize)]
+struct TranscriptWindow {
+    before: Option<u64>,
+    limit: Option<usize>,
+}
 
 /// Detail goes to the operator's terminal, not to the client: the context
 /// chain carries the herdr socket path.
@@ -104,7 +184,10 @@ enum Source {
 impl Source {
     fn as_herdr(self) -> &'static str {
         match self {
-            Source::Scrollback => "recent",
+            // `recent` hands back rows already broken at the pane's width, so a
+            // narrow pane's output arrives pre-wrapped and unreadable on a
+            // phone; the unwrapped source joins the soft wraps back up.
+            Source::Scrollback => "recent_unwrapped",
             Source::Screen => "visible",
         }
     }
@@ -126,6 +209,295 @@ async fn output(
         .await
         .map_err(failed("could not read the pane"))?;
     Ok(([("x-truncated", output.truncated.to_string())], output.text))
+}
+
+/// The newest `limit` messages, or the `limit` messages whose `seq` is strictly
+/// below `before`. `has_more` says whether anything older remains.
+fn window(
+    messages: &[transcript::Message],
+    before: Option<u64>,
+    limit: usize,
+) -> (&[transcript::Message], bool) {
+    let end = match before {
+        Some(before) => messages.partition_point(|message| message.seq < before),
+        None => messages.len(),
+    };
+    let start = end.saturating_sub(limit);
+    (&messages[start..end], start > 0)
+}
+
+fn etag(version: &str, before: Option<u64>, limit: usize) -> String {
+    let anchor = before.map_or_else(|| "tail".to_string(), |before| before.to_string());
+    format!("\"{version}-{anchor}-{limit}\"")
+}
+
+fn card(message: &transcript::Message) -> Card {
+    Card {
+        seq: message.seq,
+        role: message.role,
+        preview: markdown::preview(&message.text, 300),
+        html: match message.role {
+            transcript::Role::Assistant => markdown::to_html(&message.text),
+            // The user's own words are not markup, and reach the phone through
+            // the same field, so they arrive as HTML that means what they typed.
+            transcript::Role::User => markdown::escape(&message.text),
+        },
+    }
+}
+
+fn transcript_is_missing(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            || cause
+                .downcast_ref::<rusqlite::Error>()
+                .is_some_and(|error| {
+                    matches!(
+                        error,
+                        rusqlite::Error::SqliteFailure(code, _)
+                            if code.code == rusqlite::ErrorCode::CannotOpen
+                    )
+                })
+    })
+}
+
+/// Parsing a cold transcript — forty-four megabytes at the extreme — reading
+/// SQLite, and rendering markdown are all synchronous. Only a source that went
+/// missing becomes `None`; other failures keep the cache and reach the client
+/// as an error.
+fn take_window(
+    cache: Cache,
+    key: String,
+    identity: TranscriptIdentity,
+    ticket: u64,
+    home: std::path::PathBuf,
+    before: Option<u64>,
+    limit: usize,
+) -> anyhow::Result<Option<(String, Vec<transcript::Message>, bool)>> {
+    let cached = {
+        let map = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
+        map.entries
+            .get(&key)
+            .filter(|entry| entry.identity == identity)
+            .map(|entry| Arc::clone(&entry.transcript))
+    };
+    let entry = match cached {
+        Some(entry) => entry,
+        None => {
+            let resolved = transcript::resolve(&identity.pane(), &home)
+                .map(Transcript::open)
+                .map(Mutex::new)
+                .map(Arc::new);
+            let mut map = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
+            if map
+                .last_close
+                .get(&key)
+                .is_some_and(|last_close| *last_close > ticket)
+            {
+                return Ok(None);
+            }
+            match map.entries.get(&key) {
+                Some(cached) if cached.ticket > ticket || cached.identity == identity => {
+                    Arc::clone(&cached.transcript)
+                }
+                _ => {
+                    let Some(entry) = resolved else {
+                        return Ok(None);
+                    };
+                    map.entries.insert(
+                        key.clone(),
+                        CacheEntry {
+                            identity,
+                            ticket,
+                            transcript: Arc::clone(&entry),
+                        },
+                    );
+                    entry
+                }
+            }
+        }
+    };
+    let mut transcript = entry
+        .lock()
+        .map_err(|_| anyhow::anyhow!("transcript cache entry is poisoned"))?;
+    if let Err(error) = transcript.refresh() {
+        if transcript_is_missing(&error) {
+            drop(transcript);
+            let mut map = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
+            if map
+                .entries
+                .get(&key)
+                .is_some_and(|cached| Arc::ptr_eq(&cached.transcript, &entry))
+            {
+                map.entries.remove(&key);
+            }
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    let version = transcript.version();
+    let (messages, has_more) = window(transcript.messages(), before, limit);
+    Ok(Some((version, messages.to_vec(), has_more)))
+}
+
+/// A pane with no resolvable transcript answers 404: the phone reads that as
+/// "use the raw output view", not as a fault.
+async fn transcript_route(
+    State(state): State<AppState>,
+    Path(pane_id): Path<String>,
+    Query(query): Query<TranscriptWindow>,
+    headers: header::HeaderMap,
+) -> ApiResult<Response> {
+    let ticket = next_transcript_ticket();
+    let context = herdr::pane_context(&pane_id)
+        .await
+        .map_err(failed("could not read the herdr session"))?
+        .ok_or((StatusCode::NOT_FOUND, "no such pane"))?;
+    let session = context.session.as_ref();
+    let identity = TranscriptIdentity {
+        agent: context.agent.unwrap_or_default(),
+        session_kind: session.map(|session| session.kind.clone()),
+        session_value: session.map(|session| session.value.clone()),
+        cwd: context.cwd,
+        title: context.title,
+    };
+
+    let limit = query.limit.unwrap_or(30).clamp(1, 200);
+    let before = query.before;
+    let cache = state.transcripts.clone();
+    let key = pane_id.clone();
+    let home = transcript::home();
+    let taken = tokio::task::spawn_blocking(move || {
+        take_window(cache, key, identity, ticket, home, before, limit)
+    })
+    .await
+    .map_err(|error| {
+        eprintln!("transcript task failed: {error}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read the transcript",
+        )
+    })?
+    .map_err(failed("could not read the transcript"))?;
+    let Some((version, messages, has_more)) = taken else {
+        return Err((StatusCode::NOT_FOUND, "no transcript for this pane"));
+    };
+
+    // The window is part of the identity: an ETag that named only the file's
+    // length would let a `before=` page answer 304 for content the phone has
+    // never held.
+    let etag = etag(&version, before, limit);
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        == Some(etag.as_str())
+    {
+        return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
+    }
+
+    let page = TranscriptPage {
+        messages: messages.iter().map(card).collect(),
+        has_more,
+    };
+    Ok(([(header::ETAG, etag)], Json(page)).into_response())
+}
+
+#[derive(Serialize)]
+struct LiveView {
+    screen: String,
+    composer: String,
+}
+
+/// The whole visible screen, not a cropped region: a picker is drawn wherever
+/// the agent likes, the pane's status stays `idle` while one is open, and a
+/// zoomed screen measured 1,393 bytes. `MAX_OUTPUT_LINES` is the same ceiling
+/// the raw-output route uses, and no measured screen approaches it.
+async fn live_route(Path(pane_id): Path<String>) -> ApiResult<Json<LiveView>> {
+    let context = herdr::pane_context(&pane_id)
+        .await
+        .map_err(failed("could not read the herdr session"))?
+        .ok_or((StatusCode::NOT_FOUND, "no such pane"))?;
+    let output = herdr::read(&pane_id, MAX_OUTPUT_LINES, "visible")
+        .await
+        .map_err(failed("could not read the pane"))?;
+    let composer = context
+        .agent
+        .as_deref()
+        .and_then(|agent| live::composer(agent, &output.text))
+        .unwrap_or_default();
+    Ok(Json(LiveView {
+        screen: output.text,
+        composer,
+    }))
+}
+
+/// The pane that must be released before `pane_id` can take the slot.
+fn superseded(slot: &Option<String>, pane_id: &str) -> Option<String> {
+    slot.clone().filter(|held| held != pane_id)
+}
+
+async fn open(State(state): State<AppState>, Path(pane_id): Path<String>) -> ApiResult<StatusCode> {
+    let mut slot = state.zoomed.0.lock().await;
+    if let Some(previous) = superseded(&slot, &pane_id) {
+        // herdr keeps one zoom per tab, so zooming the new pane moves the zoom
+        // anyway; a failure here is worth reporting and not worth refusing the
+        // pane the phone actually asked for.
+        if let Err(error) = herdr::zoom(&previous, false).await {
+            eprintln!("could not unzoom {previous}: {error:#}");
+        }
+    }
+    herdr::zoom(&pane_id, true)
+        .await
+        .map_err(failed("could not zoom the pane"))?;
+    *slot = Some(pane_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Remember the newest close for a pane. Two closes can take their tickets in
+/// one order and reach the cache lock in the other; overwriting would let the
+/// older one lower the tombstone, and a request holding a ticket between them
+/// would then pass the check and resurrect the entry it was meant to drop.
+fn record_close(cache: &mut TranscriptCache, pane_id: &str, ticket: u64) {
+    let last = cache
+        .last_close
+        .entry(pane_id.to_string())
+        .or_insert(ticket);
+    *last = (*last).max(ticket);
+}
+
+async fn close(
+    State(state): State<AppState>,
+    Path(pane_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let ticket = next_transcript_ticket();
+    {
+        let mut cache = state.transcripts.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not release the transcript",
+            )
+        })?;
+        cache.entries.remove(&pane_id);
+        record_close(&mut cache, &pane_id, ticket);
+    }
+    let mut slot = state.zoomed.0.lock().await;
+    if slot.as_deref() != Some(pane_id.as_str()) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    herdr::zoom(&pane_id, false)
+        .await
+        .map_err(failed("could not unzoom the pane"))?;
+    // Only after the pane is actually back: a slot cleared on a failed unzoom
+    // would leave a zoomed pane that no later `open` knows to release.
+    *slot = None;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- Host allowlist ---------------------------------------------------------
@@ -294,9 +666,14 @@ fn app(allowed: Allowed) -> Router {
         .route("/panes/{pane_id}/up", post(up))
         .route("/panes/{pane_id}/down", post(down))
         .route("/panes/{pane_id}/output", get(output))
+        .route("/panes/{pane_id}/transcript", get(transcript_route))
+        .route("/panes/{pane_id}/live", get(live_route))
+        .route("/panes/{pane_id}/open", post(open))
+        .route("/panes/{pane_id}/close", post(close))
         // Unknown paths claimed by the nest stay API responses.
         .fallback(|| async { StatusCode::NOT_FOUND })
-        .layer(middleware::map_response(no_store));
+        .layer(middleware::map_response(no_store))
+        .with_state(AppState::default());
 
     // The UI routes on the path (/w/<workspace>/t/<tab>/p/<pane>), so a deep
     // link or a reload asks for a file that does not exist; hand back the app.
@@ -341,6 +718,705 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn scrollback_asks_herdr_to_unwrap() {
+        assert_eq!(Source::Scrollback.as_herdr(), "recent_unwrapped");
+        assert_eq!(Source::Screen.as_herdr(), "visible");
+    }
+
+    fn messages(seqs: &[u64]) -> Vec<herdr_remote::transcript::Message> {
+        seqs.iter()
+            .map(|seq| herdr_remote::transcript::Message {
+                seq: *seq,
+                role: herdr_remote::transcript::Role::User,
+                text: format!("m{seq}"),
+            })
+            .collect()
+    }
+
+    fn line_source(path: std::path::PathBuf) -> transcript::Source {
+        transcript::Source::Lines {
+            path,
+            format: transcript::Format::Claude,
+        }
+    }
+
+    fn transcript_identity() -> TranscriptIdentity {
+        TranscriptIdentity {
+            agent: "claude".into(),
+            session_kind: None,
+            session_value: None,
+            cwd: "/repo".into(),
+            title: None,
+        }
+    }
+
+    fn insert_cached(
+        cache: &Cache,
+        key: &str,
+        identity: &TranscriptIdentity,
+        source: transcript::Source,
+    ) -> Arc<Mutex<Transcript>> {
+        let transcript = Arc::new(Mutex::new(Transcript::open(source)));
+        cache.lock().unwrap().entries.insert(
+            key.into(),
+            CacheEntry {
+                identity: identity.clone(),
+                ticket: next_transcript_ticket(),
+                transcript: Arc::clone(&transcript),
+            },
+        );
+        transcript
+    }
+
+    fn is_cached(cache: &Cache, key: &str) -> bool {
+        cache.lock().unwrap().entries.contains_key(key)
+    }
+
+    fn cached_identity(cache: &Cache, key: &str) -> Option<TranscriptIdentity> {
+        cache
+            .lock()
+            .unwrap()
+            .entries
+            .get(key)
+            .map(|entry| entry.identity.clone())
+    }
+
+    fn scratch_home(label: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "herdr-remote-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
+    fn write_claude(home: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf {
+        let path = home.join(".claude/projects/-repo").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::json!({ "type": "user", "message": { "content": text } })
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    fn blocking_codex_rollout(
+        home: &std::path::Path,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let rollout = home
+            .join(".codex/sessions/2026/09/01")
+            .join("rollout-2026-09-01T00-00-00-session.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&rollout)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let (write_tx, write_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut pipe = std::fs::OpenOptions::new()
+                .write(true)
+                .open(rollout)
+                .unwrap();
+            opened_tx.send(()).unwrap();
+            write_rx.recv().unwrap();
+            writeln!(
+                pipe,
+                "{}",
+                serde_json::json!({ "type": "session_meta",
+                                    "payload": { "cwd": "/repo" } })
+            )
+            .unwrap();
+        });
+        (opened_rx, write_tx, writer)
+    }
+
+    fn write_codex_meta(home: &std::path::Path, name: &str) {
+        let path = home.join(".codex/sessions/2026/09/01").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "{}\n",
+                serde_json::json!({ "type": "session_meta", "payload": { "cwd": "/repo" } })
+            ),
+        )
+        .unwrap();
+    }
+
+    fn newest_text(
+        cache: &Cache,
+        identity: &TranscriptIdentity,
+        home: &std::path::Path,
+    ) -> Option<String> {
+        take_window(
+            cache.clone(),
+            "pane".into(),
+            identity.clone(),
+            next_transcript_ticket(),
+            home.to_path_buf(),
+            None,
+            30,
+        )
+        .unwrap()?
+        .1
+        .first()
+        .map(|message| message.text.clone())
+    }
+
+    #[test]
+    fn a_non_missing_refresh_error_keeps_the_cached_transcript() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-remote-refresh-error-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        let cache = Cache::default();
+        let identity = transcript_identity();
+        insert_cached(&cache, "pane", &identity, line_source(path));
+
+        let result = take_window(
+            cache.clone(),
+            "pane".into(),
+            identity,
+            next_transcript_ticket(),
+            std::path::PathBuf::new(),
+            None,
+            30,
+        );
+
+        assert!(result.is_err());
+        assert!(is_cached(&cache, "pane"));
+    }
+
+    #[test]
+    fn a_missing_transcript_drops_its_cache_entry() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-remote-missing-transcript-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let cache = Cache::default();
+        let identity = transcript_identity();
+        insert_cached(&cache, "pane", &identity, line_source(path));
+
+        let result = take_window(
+            cache.clone(),
+            "pane".into(),
+            identity,
+            next_transcript_ticket(),
+            std::path::PathBuf::new(),
+            None,
+            30,
+        );
+
+        assert!(matches!(result, Ok(None)));
+        assert!(!is_cached(&cache, "pane"));
+    }
+
+    #[test]
+    fn a_deleted_cursor_store_drops_its_cache_entry() {
+        let home = scratch_home("deleted-cursor-store");
+        let path = home.join("store.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "create table blobs (id text primary key, data blob);\
+                 create table meta (key text primary key, value text);",
+            )
+            .unwrap();
+        let root = "0".repeat(64);
+        connection
+            .execute(
+                "insert into blobs values (?1, ?2)",
+                rusqlite::params![root, Vec::<u8>::new()],
+            )
+            .unwrap();
+        let meta = serde_json::json!({ "latestRootBlobId": root }).to_string();
+        let encoded = meta
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        connection
+            .execute("insert into meta values ('0', ?1)", [encoded])
+            .unwrap();
+        drop(connection);
+
+        let cache = Cache::default();
+        let identity = transcript_identity();
+        insert_cached(
+            &cache,
+            "pane",
+            &identity,
+            transcript::Source::CursorDb { path: path.clone() },
+        );
+        assert!(
+            take_window(
+                cache.clone(),
+                "pane".into(),
+                identity.clone(),
+                next_transcript_ticket(),
+                home.clone(),
+                None,
+                30,
+            )
+            .unwrap()
+            .is_some()
+        );
+
+        std::fs::remove_file(path).unwrap();
+        let result = take_window(
+            cache.clone(),
+            "pane".into(),
+            identity,
+            next_transcript_ticket(),
+            home,
+            None,
+            30,
+        );
+
+        assert!(matches!(result, Ok(None)), "{result:?}");
+        assert!(!is_cached(&cache, "pane"));
+    }
+
+    #[test]
+    fn a_busy_transcript_does_not_lock_the_whole_cache() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-remote-busy-transcript-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let source = line_source(path);
+        let identity = transcript_identity();
+        let cache = Cache::default();
+        let transcript = insert_cached(&cache, "busy", &identity, source);
+        let held = transcript.lock().unwrap();
+        let worker_cache = cache.clone();
+        let worker = std::thread::spawn(move || {
+            take_window(
+                worker_cache,
+                "busy".into(),
+                identity,
+                next_transcript_ticket(),
+                std::path::PathBuf::new(),
+                None,
+                30,
+            )
+        });
+
+        while Arc::strong_count(&transcript) < 3 {
+            std::thread::yield_now();
+        }
+        let (sent, received) = std::sync::mpsc::channel();
+        let probe_cache = cache.clone();
+        let probe = std::thread::spawn(move || {
+            let _map = probe_cache.lock().unwrap();
+            sent.send(()).unwrap();
+        });
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_ok()
+        );
+
+        drop(held);
+        assert!(matches!(worker.join().unwrap(), Ok(None)));
+        probe.join().unwrap();
+    }
+
+    #[test]
+    fn resolution_is_reused_until_the_pane_identity_changes() {
+        let home = scratch_home("resolution-cache");
+        write_claude(&home, "older.jsonl", "older");
+        let cache = Cache::default();
+        let identity = transcript_identity();
+
+        assert_eq!(
+            newest_text(&cache, &identity, &home).as_deref(),
+            Some("older")
+        );
+
+        let newer = write_claude(&home, "newer.jsonl", "newer");
+        std::fs::File::open(&newer)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            newest_text(&cache, &identity, &home).as_deref(),
+            Some("older")
+        );
+
+        let changed = TranscriptIdentity {
+            title: Some("new title".into()),
+            ..identity
+        };
+        assert_eq!(
+            newest_text(&cache, &changed, &home).as_deref(),
+            Some("newer")
+        );
+    }
+
+    #[test]
+    fn a_transcript_created_after_a_resolution_miss_is_found() {
+        let home = scratch_home("resolution-miss");
+        let cache = Cache::default();
+        let identity = transcript_identity();
+
+        assert_eq!(newest_text(&cache, &identity, &home), None);
+
+        write_claude(&home, "session.jsonl", "ready");
+        assert_eq!(
+            newest_text(&cache, &identity, &home).as_deref(),
+            Some("ready")
+        );
+    }
+
+    #[tokio::test]
+    async fn close_releases_the_panes_cached_transcript() {
+        let state = AppState::default();
+        let identity = transcript_identity();
+        insert_cached(
+            &state.transcripts,
+            "pane",
+            &identity,
+            line_source(std::path::PathBuf::from("unused.jsonl")),
+        );
+
+        assert_eq!(
+            close(State(state.clone()), Path("pane".into())).await,
+            Ok(StatusCode::NO_CONTENT)
+        );
+        assert!(!is_cached(&state.transcripts, "pane"));
+    }
+
+    #[tokio::test]
+    async fn a_close_after_request_ticket_prevents_cache_reinsertion() {
+        let home = scratch_home("close-after-ticket");
+        write_claude(&home, "session.jsonl", "stale");
+        let state = AppState::default();
+        let identity = transcript_identity();
+        let request_ticket = next_transcript_ticket();
+
+        assert_eq!(
+            close(State(state.clone()), Path("pane".into())).await,
+            Ok(StatusCode::NO_CONTENT)
+        );
+        let result = take_window(
+            state.transcripts.clone(),
+            "pane".into(),
+            identity,
+            request_ticket,
+            home,
+            None,
+            30,
+        );
+
+        assert!(matches!(result, Ok(None)));
+        assert!(!is_cached(&state.transcripts, "pane"));
+    }
+
+    /// The tombstone must survive a close whose ticket is older than one already
+    /// recorded — the ordering the lock does not guarantee.
+    #[test]
+    fn an_out_of_order_close_cannot_lower_the_tombstone() {
+        let mut cache = TranscriptCache::default();
+        record_close(&mut cache, "pane", 5);
+        record_close(&mut cache, "pane", 3);
+        assert_eq!(cache.last_close.get("pane"), Some(&5));
+    }
+
+    #[test]
+    fn an_older_request_ticket_cannot_replace_a_newer_identity() {
+        let home = scratch_home("older-request-ticket");
+        write_claude(&home, "session.jsonl", "ready");
+        let cache = Cache::default();
+        let old_identity = transcript_identity();
+        let old_ticket = next_transcript_ticket();
+        let new_identity = TranscriptIdentity {
+            title: Some("new identity".into()),
+            ..transcript_identity()
+        };
+        let new_ticket = next_transcript_ticket();
+
+        assert!(
+            take_window(
+                cache.clone(),
+                "pane".into(),
+                new_identity.clone(),
+                new_ticket,
+                home.clone(),
+                None,
+                30,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            take_window(
+                cache.clone(),
+                "pane".into(),
+                old_identity,
+                old_ticket,
+                home,
+                None,
+                30,
+            )
+            .unwrap()
+            .is_some()
+        );
+
+        assert!(cached_identity(&cache, "pane").as_ref() == Some(&new_identity));
+    }
+
+    #[test]
+    fn concurrent_cold_requests_for_one_pane_both_receive_a_transcript() {
+        let home = scratch_home("concurrent-cold-requests");
+        let cache = Cache::default();
+        let identity = TranscriptIdentity {
+            agent: "codex".into(),
+            ..transcript_identity()
+        };
+        let old_ticket = next_transcript_ticket();
+        let old_cache = cache.clone();
+        let old_identity = identity.clone();
+        let old_home = home.clone();
+        let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
+        let old = std::thread::spawn(move || {
+            take_window(
+                old_cache,
+                "pane".into(),
+                old_identity,
+                old_ticket,
+                old_home,
+                None,
+                30,
+            )
+        });
+
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        write_codex_meta(&home, "rollout-2026-09-01T01-00-00-new.jsonl");
+        let newer = take_window(
+            cache,
+            "pane".into(),
+            identity,
+            next_transcript_ticket(),
+            home,
+            None,
+            30,
+        );
+        write_tx.send(()).unwrap();
+        writer.join().unwrap();
+        let older = old.join().unwrap();
+
+        assert!(older.unwrap().is_some());
+        assert!(newer.unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_during_resolution_does_not_reinsert_the_transcript() {
+        let home = scratch_home("close-during-resolution");
+        let state = AppState::default();
+        let worker_cache = state.transcripts.clone();
+        let identity = TranscriptIdentity {
+            agent: "codex".into(),
+            ..transcript_identity()
+        };
+        let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
+        let worker = std::thread::spawn(move || {
+            take_window(
+                worker_cache,
+                "pane".into(),
+                identity,
+                next_transcript_ticket(),
+                home,
+                None,
+                30,
+            )
+        });
+
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            close(State(state.clone()), Path("pane".into())).await,
+            Ok(StatusCode::NO_CONTENT)
+        );
+        write_tx.send(()).unwrap();
+        writer.join().unwrap();
+
+        assert!(matches!(worker.join().unwrap(), Ok(None)));
+        assert!(!is_cached(&state.transcripts, "pane"));
+    }
+
+    #[test]
+    fn an_older_resolution_cannot_replace_a_newer_identity() {
+        let home = scratch_home("superseded-resolution");
+        let cache = Cache::default();
+        let old_cache = cache.clone();
+        let old_identity = TranscriptIdentity {
+            agent: "codex".into(),
+            ..transcript_identity()
+        };
+        let old_home = home.clone();
+        let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
+        let old = std::thread::spawn(move || {
+            take_window(
+                old_cache,
+                "pane".into(),
+                old_identity,
+                next_transcript_ticket(),
+                old_home,
+                None,
+                30,
+            )
+        });
+
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        write_claude(&home, "new.jsonl", "new");
+        let new_identity = transcript_identity();
+        assert_eq!(
+            newest_text(&cache, &new_identity, &home).as_deref(),
+            Some("new")
+        );
+        write_tx.send(()).unwrap();
+        writer.join().unwrap();
+
+        assert!(old.join().unwrap().unwrap().is_some());
+        assert!(cached_identity(&cache, "pane").as_ref() == Some(&new_identity));
+    }
+
+    #[test]
+    fn no_cursor_returns_the_newest_window() {
+        let all = messages(&[0, 1, 2, 3, 4]);
+        let (page, has_more) = window(&all, None, 2);
+        assert_eq!(page.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![3, 4]);
+        assert!(has_more);
+    }
+
+    #[test]
+    fn a_cursor_is_exclusive_and_reaches_further_back() {
+        let all = messages(&[0, 1, 2, 3, 4]);
+        let (page, has_more) = window(&all, Some(3), 2);
+        assert_eq!(page.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(has_more);
+    }
+
+    #[test]
+    fn the_oldest_page_reports_nothing_more() {
+        let all = messages(&[0, 1, 2]);
+        let (page, has_more) = window(&all, Some(2), 30);
+        assert_eq!(page.len(), 2);
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn an_empty_transcript_is_an_empty_page_not_an_error() {
+        let (page, has_more) = window(&[], None, 30);
+        assert!(page.is_empty());
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn etags_distinguish_tail_cursor_and_limit() {
+        let tail = etag("version", None, 30);
+        let earlier = etag("version", Some(42), 30);
+        let wider = etag("version", None, 60);
+
+        assert_eq!(tail, "\"version-tail-30\"");
+        assert_eq!(earlier, "\"version-42-30\"");
+        assert_eq!(wider, "\"version-tail-60\"");
+    }
+
+    #[test]
+    fn a_user_card_carries_escaped_text_and_an_agent_card_carries_html() {
+        let user = card(&herdr_remote::transcript::Message {
+            seq: 0,
+            role: herdr_remote::transcript::Role::User,
+            text: "<b>hi</b>".into(),
+        });
+        assert_eq!(user.html, "&lt;b&gt;hi&lt;/b&gt;");
+        let agent = card(&herdr_remote::transcript::Message {
+            seq: 1,
+            role: herdr_remote::transcript::Role::Assistant,
+            text: "**hi**".into(),
+        });
+        assert!(agent.html.contains("<strong>hi</strong>"));
+    }
+
+    #[test]
+    fn the_live_view_names_its_fields_the_way_the_phone_reads_them() {
+        let json = serde_json::to_value(LiveView {
+            screen: "❯ draft".into(),
+            composer: "draft".into(),
+        })
+        .unwrap();
+        assert_eq!(json["screen"], "❯ draft");
+        assert_eq!(json["composer"], "draft");
+    }
+
+    #[test]
+    fn opening_a_second_pane_supersedes_the_first() {
+        assert_eq!(superseded(&None, "w1:p1"), None);
+        assert_eq!(
+            superseded(&Some("w1:p1".into()), "w1:p2"),
+            Some("w1:p1".into())
+        );
+        // Re-opening the pane already held is not a transition.
+        assert_eq!(superseded(&Some("w1:p1".into()), "w1:p1"), None);
+    }
+
+    #[tokio::test]
+    async fn opening_a_second_pane_unzooms_the_first_before_zooming_the_second() {
+        let reply = b"{\"id\":\"herdr-remote\",\"result\":{}}\n";
+        let (socket, mut requests) = herdr::fake_herdr(vec![reply, reply]);
+        let _socket = herdr::use_test_socket(socket);
+        let state = AppState::default();
+        *state.zoomed.0.lock().await = Some("w1:p1".into());
+
+        assert_eq!(
+            open(State(state), Path("w1:p2".into())).await,
+            Ok(StatusCode::NO_CONTENT)
+        );
+
+        let first = requests.recv().await.unwrap();
+        let second = requests.recv().await.unwrap();
+        assert_eq!(first["method"], "pane.zoom");
+        assert_eq!(
+            first["params"],
+            serde_json::json!({ "pane_id": "w1:p1", "zoomed": false })
+        );
+        assert_eq!(second["method"], "pane.zoom");
+        assert_eq!(
+            second["params"],
+            serde_json::json!({ "pane_id": "w1:p2", "zoomed": true })
+        );
+    }
 
     #[test]
     fn bare_keys_reach_agents_only() {
