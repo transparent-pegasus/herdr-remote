@@ -8,6 +8,11 @@ pub fn strip(text: &str) -> String {
     if let Some(inner) = between(text, "<user_query>", "</user_query>") {
         return inner.trim().to_string();
     }
+    // A slash command's turn is nothing but its own tags. What the person
+    // typed is the name and the arguments; the rest is the harness talking.
+    if text.trim_start().starts_with("<command-name>") {
+        return command(text);
+    }
     let mut out = text.to_string();
     for (open, close) in [
         ("<system-reminder>", "</system-reminder>"),
@@ -18,6 +23,14 @@ pub fn strip(text: &str) -> String {
         out = drop_blocks(&out, open, close);
     }
     out.trim().to_string()
+}
+
+fn command(text: &str) -> String {
+    let name = between(text, "<command-name>", "</command-name>").unwrap_or_default();
+    let args = between(text, "<command-args>", "</command-args>").unwrap_or_default();
+    format!("{} {}", name.trim(), args.trim())
+        .trim()
+        .to_string()
 }
 
 fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
@@ -70,6 +83,25 @@ mod tests {
     fn an_unterminated_block_does_not_leak_its_tag() {
         let text = "keep this\n<system-reminder>truncated…";
         assert_eq!(strip(text), "keep this");
+    }
+
+    #[test]
+    fn a_slash_command_shows_as_what_was_typed() {
+        let text = "<command-name>/model</command-name>\n  <command-message>model</command-message>\n  <command-args>claude-opus-5</command-args>";
+        assert_eq!(strip(text), "/model claude-opus-5");
+    }
+
+    #[test]
+    fn a_slash_command_without_arguments_is_just_its_name() {
+        let text = "<command-name>/clear</command-name>\n  <command-message>clear</command-message>\n  <command-args></command-args>";
+        assert_eq!(strip(text), "/clear");
+    }
+
+    /// Quoting the tags is not running the command: the prose has to survive.
+    #[test]
+    fn a_message_that_quotes_the_tags_keeps_its_prose() {
+        let text = "`/clear` prints\n<command-name>/clear</command-name>\nwhy?";
+        assert!(strip(text).starts_with("`/clear` prints"));
     }
 
     #[test]

@@ -10,6 +10,12 @@ use super::{Message, Role, preamble};
 /// bookkeeping rows.
 pub fn parse_line(line: &str, seq: u64) -> Option<Message> {
     let value: Value = serde_json::from_str(line).ok()?;
+    // `isMeta` marks what the harness injected under the user's name: the
+    // local-command caveat, a slash command's expanded body, a nudge to
+    // continue. None of it is anyone speaking.
+    if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
     let role = match value.get("type")?.as_str()? {
         "user" => Role::User,
         "assistant" => Role::Assistant,
@@ -107,6 +113,8 @@ mod tests {
             r#"{"type":"attachment","sessionId":"s"}"#,
             r#"{"type":"attachment","attachment":{"type":"selected_lines","prompt":"x"}}"#,
             r#"{"type":"mode","mode":"normal"}"#,
+            r#"{"type":"user","isMeta":true,"message":{"content":
+                "<local-command-caveat>Caveat: …</local-command-caveat>"}}"#,
             r#"{"type":"file-history-snapshot"}"#,
             "not json at all",
         ] {
@@ -123,6 +131,16 @@ mod tests {
             parse_line(line, 1).unwrap().text,
             "write <system-reminder>x</system-reminder> literally"
         );
+    }
+
+    /// The caveat row is dropped; the row after it is the command itself.
+    #[test]
+    fn a_slash_command_is_the_user_speaking() {
+        let line = r#"{"type":"user","message":{"content":
+            "<command-name>/clear</command-name>\n  <command-args></command-args>"}}"#;
+        let message = parse_line(line, 2).unwrap();
+        assert_eq!(message.role, Role::User);
+        assert_eq!(message.text, "/clear");
     }
 
     #[test]
