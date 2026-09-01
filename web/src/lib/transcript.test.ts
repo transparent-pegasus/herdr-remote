@@ -6,10 +6,10 @@ import {
 	following,
 	modalContent,
 	prepend,
+	replaceTail,
 	type Sent,
 	sentCard,
 	settle,
-	replaceTail,
 } from "./transcript";
 
 const card = (seq: number, role: Card["role"] = "assistant"): Card => ({

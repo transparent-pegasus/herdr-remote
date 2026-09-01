@@ -37,6 +37,7 @@
             d="M21 3v5h-5"
         /></svg>
       </button>
+      <p id="empty" hidden>Say anything to start the session.</p>
       <ol id="transcript" hidden></ol>
       <pre id="log" hidden></pre>
     </div>
@@ -212,6 +213,7 @@
       const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
       const transcriptEl =
         document.querySelector<HTMLOListElement>("#transcript")!;
+      const emptyEl = document.querySelector<HTMLParagraphElement>("#empty")!;
       const fullEl = document.querySelector<HTMLDialogElement>("#full")!;
       const fullBodyEl = fullEl.querySelector<HTMLDivElement>(".body")!;
 
@@ -256,13 +258,20 @@
         );
         paintedCards = cards;
         paintedSent = sent;
+        emptyEl.hidden = shown.length > 0;
         transcriptEl.scrollTop = follow ? transcriptEl.scrollHeight : top;
       }
 
       /** Keep our own copy of what we just sent, against the transcript as it
-       *  stands, so it can be shown until the agent's file catches up. */
+       *  stands, so it can be shown until the agent's file catches up. Only a
+       *  working pane queues: an agent that is not mid-turn takes the message
+       *  straight into its own file, and drawing a card for it would be showing
+       *  the same message twice. `-1`, not `0`, for a transcript we hold none
+       *  of: the first message a file ever holds is seq 0, and `after: 0` would
+       *  wait for a sequence that never arrives. */
       function remember(text: string) {
-        sent = [...sent, { after: cards.at(-1)?.seq ?? 0, text }];
+        if (current().pane?.state !== "working") return;
+        sent = [...sent, { after: cards.at(-1)?.seq ?? -1, text }];
         paintCards();
         // Sending is deliberate, so it goes to the end of the list whatever
         // paintCards decided from where the reader had scrolled to.
@@ -511,6 +520,7 @@
         lines = LINES;
         transcriptEl.replaceChildren(moreEl);
         transcriptEl.hidden = true;
+        emptyEl.hidden = true;
         logEl.hidden = true;
         liveEl.hidden = true;
         moreEl.hidden = true;
@@ -575,6 +585,7 @@
           // does not churn, and a shell keeps its scrollback.
           cards = [];
           transcriptEl.hidden = true;
+          emptyEl.hidden = true;
           if (pane.agent) {
             const raw = agentRawState(live?.screen);
             if (raw) {
@@ -968,18 +979,20 @@
       noscript {
         display: block;
       }
+      /* 6px of air above: on the header it is the page's own top edge, and on
+         everything that can sit under the header's rule it is the air that rule
+         needs below it, carried by the follower because a margin on the header
+         would sit outside the scrollers and never scroll away. */
       header,
       noscript,
       #status {
-        padding: 0 1rem;
+        padding: 6px 1rem 0;
       }
-      /* Closed off by the same rule the composer draws. Nothing below the
-         rule: what follows brings its own air, or sits against it. */
+      /* Closed off by the same rule the composer draws. */
       header {
         display: flex;
         align-items: center;
         gap: 0.5rem;
-        margin: 6px 0 0;
         padding-bottom: 6px;
         border-bottom: 1px solid var(--edge);
       }
@@ -1060,7 +1073,7 @@
         flex: 1;
         list-style: none;
         margin: 0;
-        padding: 0 1rem 0.5rem;
+        padding: 6px 1rem 0.5rem;
         overflow-y: auto;
         overscroll-behavior: contain;
         display: flex;
@@ -1070,7 +1083,16 @@
       /* Older WebViews do not mark the UA `[hidden]` rule `!important`, so a
          `display` of our own would win over it — the same reason `#log[hidden]`
          already exists below. */
+      /* An agent that has written no transcript yet: the history view is the
+         right one, there is simply nothing in it to read. */
+      #empty {
+        margin: 0;
+        padding: 6px 1rem 0;
+        text-align: center;
+        color: var(--muted);
+      }
       #transcript[hidden],
+      #empty[hidden],
       #live[hidden],
       #more[hidden],
       #beat[hidden] {
@@ -1197,7 +1219,12 @@
       }
       /* A terminal screen is a fixed grid whose boxes wrapping would break, so
          it is scaled to whatever fits instead of scrolled. */
+      /* Centred in both axes: a screen narrower or shorter than the sheet sits
+         in the middle of it rather than in a corner. Scaling from the middle is
+         what keeps it there once `fitScreen` shrinks an oversized one. */
       #screen .body {
+        display: grid;
+        place-items: center;
         overflow: hidden;
       }
       #screen pre {
@@ -1206,7 +1233,7 @@
         font: 12px/1.35 ui-monospace, monospace;
         white-space: pre;
         transform: scale(var(--fit, 1));
-        transform-origin: top left;
+        transform-origin: center;
       }
       #full-close,
       #screen-close {
@@ -1285,7 +1312,7 @@
       #list,
       #log {
         flex: 1;
-        padding: 0 1rem;
+        padding: 6px 1rem 0;
         overflow-y: auto;
         overscroll-behavior: contain;
       }

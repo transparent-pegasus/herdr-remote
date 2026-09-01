@@ -198,6 +198,16 @@ pub fn resolve(pane: &PaneRef, home: &Path) -> Option<Source> {
     }
 }
 
+/// Whether this server can read the named agent's transcripts at all. A pane
+/// running one of them has an empty history before its first turn; a pane
+/// running anything else — or no agent — has none this server can ever show.
+pub fn parsable(agent: &str) -> bool {
+    // Asked of `source_for` rather than of a second list of names, which would
+    // be a list to keep in step. The path it is handed is thrown away with the
+    // source it names.
+    source_for(agent, PathBuf::new()).is_some()
+}
+
 fn source_for(agent: &str, path: PathBuf) -> Option<Source> {
     match agent {
         "claude" => Some(Source::Lines {

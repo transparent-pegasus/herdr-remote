@@ -347,8 +347,10 @@ fn take_window(
     Ok(Some((version, messages.to_vec(), has_more)))
 }
 
-/// A pane with no resolvable transcript answers 404: the phone reads that as
-/// "use the raw output view", not as a fault.
+/// A pane whose agent this server cannot read answers 404: the phone reads that
+/// as "use the raw output view", not as a fault. An agent it can read but that
+/// has written no transcript yet answers an empty page instead — a session that
+/// has not started is empty, not absent.
 async fn transcript_route(
     State(state): State<AppState>,
     Path(pane_id): Path<String>,
@@ -369,6 +371,7 @@ async fn transcript_route(
         title: context.title,
     };
 
+    let agent = identity.agent.clone();
     let limit = query.limit.unwrap_or(30).clamp(1, 200);
     let before = query.before;
     let cache = state.transcripts.clone();
@@ -387,6 +390,13 @@ async fn transcript_route(
     })?
     .map_err(failed("could not read the transcript"))?;
     let Some((version, messages, has_more)) = taken else {
+        if transcript::parsable(&agent) {
+            return Ok(Json(TranscriptPage {
+                messages: Vec::new(),
+                has_more: false,
+            })
+            .into_response());
+        }
         return Err((StatusCode::NOT_FOUND, "no transcript for this pane"));
     };
 
