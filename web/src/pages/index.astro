@@ -41,7 +41,7 @@
       <pre id="log" hidden></pre>
     </div>
     <dialog id="full">
-      <div class="body"></div>
+      <div class="body" tabindex="-1"></div>
       <button id="full-close" type="button" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -67,7 +67,15 @@
         </svg>
       </button>
     </div>
-    <dialog id="screen"><pre></pre><form method="dialog"><button>Close</button></form></dialog>
+    <dialog id="screen">
+      <div class="body"><pre></pre></div>
+      <button id="screen-close" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+        </svg>
+      </button>
+    </dialog>
 
     <form id="composer">
       <label for="text" id="target"></label>
@@ -252,15 +260,12 @@
         fullBodyEl.classList.toggle("wrap", wrap);
         fullBodyEl.innerHTML = html;
         fullBodyEl.scrollTop = 0;
-        // The composer keeps its own height in the column, and the view stops
-        // above it, so the controls stay usable while a message is open.
-        fullEl.style.setProperty(
-          "--composer-h",
-          `${composerEl.getBoundingClientRect().height}px`,
-        );
-        // show(), not showModal(): a modal makes everything outside it inert,
-        // and the controls underneath have to keep working.
-        fullEl.show();
+        sizeSheets();
+        // showModal(): reading a message is a detour from driving the pane, so
+        // the controls below go inert the way they are outside a pane. Escape
+        // and the focus trap come with it.
+        fullEl.showModal();
+        fullBodyEl.focus();
       }
 
       transcriptEl.addEventListener("click", (event) => {
@@ -276,19 +281,38 @@
         .querySelector<HTMLButtonElement>("#full-close")!
         .addEventListener("click", () => fullEl.close());
 
-      // A non-modal dialog gets no Escape handling of its own.
-      addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && fullEl.open) fullEl.close();
-      });
-
       const liveEl = document.querySelector<HTMLDivElement>("#live")!;
       const draftEl = document.querySelector<HTMLSpanElement>("#draft")!;
       const beatEl = document.querySelector<HTMLSpanElement>("#beat")!;
       const expandEl = document.querySelector<HTMLButtonElement>("#expand")!;
       const screenEl = document.querySelector<HTMLDialogElement>("#screen")!;
+      const screenViewEl = screenEl.querySelector<HTMLDivElement>(".body")!;
       const screenBodyEl = screenEl.querySelector<HTMLPreElement>("pre")!;
+      const screenCloseEl =
+        document.querySelector<HTMLButtonElement>("#screen-close")!;
 
       let screenText = "";
+
+      /** Both sheets end where the composer begins, and so does the veil. */
+      function sizeSheets() {
+        document.documentElement.style.setProperty(
+          "--composer-h",
+          `${composerEl.getBoundingClientRect().height}px`,
+        );
+      }
+
+      /** Scaled, not scrolled: the screen is a grid of characters whose boxes
+       *  wrapping would break, and the reader wants the whole of it at once. */
+      function fitScreen() {
+        if (!screenEl.open) return;
+        screenBodyEl.style.setProperty("--fit", "1");
+        const scale = Math.min(
+          screenViewEl.clientWidth / (screenBodyEl.scrollWidth || 1),
+          screenViewEl.clientHeight / (screenBodyEl.scrollHeight || 1),
+          1,
+        );
+        screenBodyEl.style.setProperty("--fit", String(scale));
+      }
 
       function paintLive(live: Live, state: string) {
         draftEl.textContent = live.composer;
@@ -296,7 +320,7 @@
         screenText = live.screen;
         if (screenEl.open && screenBodyEl.textContent !== live.screen) {
           screenBodyEl.textContent = live.screen;
-          screenBodyEl.scrollTop = screenBodyEl.scrollHeight;
+          fitScreen();
         }
       }
 
@@ -315,12 +339,26 @@
       // offered in every state rather than gated on `blocked`.
       expandEl.addEventListener("click", () => {
         screenBodyEl.textContent = screenText;
-        screenEl.showModal();
-        screenBodyEl.scrollTop = screenBodyEl.scrollHeight;
+        sizeSheets();
+        // show(), not showModal(): a picker on the screen is answered with the
+        // controls below it, which a modal would make inert.
+        screenEl.show();
+        fitScreen();
       });
 
-      screenEl.addEventListener("click", (event) => {
-        if (event.target === screenEl) screenEl.close();
+      screenCloseEl.addEventListener("click", () => screenEl.close());
+
+      // A non-modal dialog gets no Escape handling of its own.
+      addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && screenEl.open) screenEl.close();
+      });
+
+      // A rotation or an on-screen keyboard moves the composer and changes what
+      // fits; both sheets are measured against it.
+      addEventListener("resize", () => {
+        if (!fullEl.open && !screenEl.open) return;
+        sizeSheets();
+        fitScreen();
       });
 
       const POLL_MS = 3000;
@@ -853,6 +891,7 @@
         --card-user: #004340;
         --card-agent: #393939;
         --full-gap: 1rem;
+        --sheet-edge: color-mix(in srgb, currentColor 50%, transparent);
       }
       /* The page owns its overscroll: a downward drag is the transcript's
          "load earlier" gesture, not the browser's reload. */
@@ -988,36 +1027,79 @@
         line-clamp: 3;
         overflow: hidden;
       }
-      /* Edge to edge and over the header, with air above and below and the
-         controls still reachable underneath — so it is opened with show(),
-         not showModal(), which would make the rest of the page inert. The
-         only edges it draws are the two shadows. */
-      #full {
+      /* Both sheets go edge to edge and over the header, with air above and
+         below, and both stop where the composer begins. What differs is who
+         may act while one is open: a message is read with showModal(), which
+         inerts the controls beneath it, and the screen with show(), because a
+         picker on it is answered with those very controls. The only edges
+         either draws are the two shadows. */
+      #full,
+      #screen {
         position: fixed;
         top: var(--full-gap);
         left: 0;
         right: 0;
         z-index: 10;
+        box-sizing: border-box;
+        width: auto;
         height: calc(100dvh - var(--composer-h, 9rem) - var(--full-gap) * 2);
         max-width: none;
         max-height: none;
+        flex-direction: column;
         margin: 0;
-        padding: 0;
         border: 0;
         border-radius: 0;
         overflow: hidden;
         background: Canvas;
         color: inherit;
         box-shadow:
-          0 -1px 0 #fff,
-          0 1px 0 #fff;
+          0 -1px 0 var(--sheet-edge),
+          0 1px 0 var(--sheet-edge);
+      }
+      /* Scoped to [open]: an unscoped display would beat the UA's own
+         `dialog:not([open]) { display: none }` and leave both sheets on. */
+      #full[open],
+      #screen[open] {
+        display: flex;
+      }
+      /* The close control's own band, reserved rather than floated over, so
+         the foot of the content is never underneath it. The screen keeps its
+         side padding here too, where it is out of the box `fitScreen` measures
+         against — `clientWidth` would carry it and clip that much off the
+         right. */
+      #full {
+        padding: 0 0 2.75rem;
+      }
+      #screen {
+        padding: 0.5rem 0.75rem 2.75rem;
+      }
+      /* The veil covers what the sheet took over and stops at the controls;
+         the UA backdrop would cover those too. */
+      #full::backdrop {
+        background: transparent;
+      }
+      body:has(dialog[open])::after {
+        position: fixed;
+        inset: 0 0 var(--composer-h, 9rem);
+        z-index: 9;
+        background: rgb(0 0 0 / 0.55);
+        content: "";
+      }
+      /* showModal() does the inerting; this is the matching dim, the one the
+         panel already wears with no pane picked. */
+      body:has(#full[open]) #composer {
+        opacity: 0.55;
+      }
+      #full .body,
+      #screen .body {
+        flex: 1;
+        min-height: 0;
       }
       #full .body {
-        height: 100%;
+        padding: 0.5rem 0.75rem;
         overflow: auto;
+        outline: none;
         overscroll-behavior: contain;
-        /* Room at the foot for the close control that floats over it. */
-        padding: 0.5rem 0.75rem 3rem;
       }
       #full .body.wrap {
         white-space: pre-wrap;
@@ -1027,7 +1109,21 @@
         display: block;
         overflow-x: auto;
       }
-      #full-close {
+      /* A terminal screen is a fixed grid whose boxes wrapping would break, so
+         it is scaled to whatever fits instead of scrolled. */
+      #screen .body {
+        overflow: hidden;
+      }
+      #screen pre {
+        width: max-content;
+        margin: 0;
+        font: 12px/1.35 ui-monospace, monospace;
+        white-space: pre;
+        transform: scale(var(--fit, 1));
+        transform-origin: top left;
+      }
+      #full-close,
+      #screen-close {
         position: absolute;
         right: 0.5rem;
         bottom: 0.5rem;
@@ -1039,7 +1135,8 @@
         color: inherit;
         cursor: pointer;
       }
-      #full-close svg {
+      #full-close svg,
+      #screen-close svg {
         width: 24px;
         height: 24px;
       }
@@ -1096,13 +1193,6 @@
       }
       @media (prefers-reduced-motion: reduce) {
         #beat g { animation: none; }
-      }
-      #screen pre {
-        margin: 0;
-        overflow: auto;
-        max-height: 80vh;
-        font-size: 12px;
-        line-height: 1.35;
       }
       /* The list and the log scroll; the composer keeps its own space in the
          column, so neither can end up underneath it. */
