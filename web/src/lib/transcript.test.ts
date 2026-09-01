@@ -16,10 +16,15 @@ const card = (seq: number, role: Card["role"] = "assistant"): Card => ({
 	html: `<p>${seq}</p>`,
 });
 
-test("a pane switch followed by a live failure cannot reveal previous raw text", () => {
-	expect(agentRawState()).toEqual({
-		text: "",
-		hidden: true,
+test("a later live failure keeps raw output painted for the same pane", () => {
+	let state = { text: "", hidden: true };
+	for (const screen of ["first screen", undefined]) {
+		state = agentRawState(screen) ?? state;
+	}
+
+	expect(state).toEqual({
+		text: "first screen",
+		hidden: false,
 	});
 });
 

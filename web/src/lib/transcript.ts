@@ -7,13 +7,13 @@ export type Card = {
 
 export type Page = { messages: Card[]; has_more: boolean };
 
-export function agentRawState(screen?: string): {
-	text: string;
-	hidden: boolean;
-} {
-	return screen === undefined
-		? { text: "", hidden: true }
-		: { text: screen, hidden: false };
+export function agentRawState(screen?: string):
+	| {
+			text: string;
+			hidden: boolean;
+	  }
+	| undefined {
+	return screen === undefined ? undefined : { text: screen, hidden: false };
 }
 
 const same = (a: Card, b: Card): boolean =>

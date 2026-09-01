@@ -462,13 +462,10 @@
           transcriptEl.hidden = true;
           if (pane.agent) {
             const raw = agentRawState(live?.screen);
-            if (raw.hidden) {
-              painted = raw.text;
-              logEl.textContent = raw.text;
-            } else {
+            if (raw) {
               paint(raw.text);
+              logEl.hidden = raw.hidden;
             }
-            logEl.hidden = raw.hidden;
             moreEl.hidden = true;
           } else {
             logEl.hidden = false;
