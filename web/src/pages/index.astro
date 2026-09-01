@@ -901,14 +901,15 @@
       :root {
         --edge: color-mix(in srgb, currentColor 15%, transparent);
         --muted: color-mix(in srgb, currentColor 60%, transparent);
-        /* The two lanes sit at one OKLCH lightness (0.3456) and differ only in
-           hue, so neither reads as the louder half. The user's hue and chroma
-           are the favicon's own — 66,249 of its chromatic pixels average
-           189.3deg — kept at the darkness the mark uses. The agent's is the
-           same lightness with the chroma taken out. Against the page text they
-           measure 8.96:1 and 9.25:1, a 3% spread. */
+        /* The user's hue and chroma are the favicon's own — 66,249 of its
+           chromatic pixels average 189.3deg — at OKLCH lightness 0.3456, the
+           darkness the mark uses. The agent's is the first draft's own value,
+           kept because the operator prefers it: a near-black that reads as the
+           page rather than as a card, which is the point when only one side of
+           the conversation is being answered. Against white text they measure
+           11.19:1 and 17.04:1. */
         --card-user: #004340;
-        --card-agent: #393939;
+        --card-agent: #1c1c1c;
         --full-gap: 1rem;
       }
       /* The page owns its overscroll: a downward drag is the transcript's
@@ -1082,8 +1083,15 @@
         border-color: var(--edge);
         border-radius: 0;
         overflow: hidden;
-        background: Canvas;
         color: inherit;
+      }
+      /* Reading a message is that card enlarged, so the sheet is its colour.
+         The screen is the terminal, and keeps the page's own. */
+      #full {
+        background: var(--card-agent);
+      }
+      #screen {
+        background: Canvas;
       }
       /* Scoped to [open]: an unscoped display would beat the UA's own
          `dialog:not([open]) { display: none }` and leave both sheets on. */
