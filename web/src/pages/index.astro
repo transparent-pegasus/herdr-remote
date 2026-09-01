@@ -223,10 +223,9 @@
        *  was sent from here and the agent has not written down yet. */
       let shown: Card[] = [];
 
-      function cardEl(card: Card, queued: boolean) {
+      function cardEl(card: Card) {
         const item = document.createElement("li");
         item.dataset.role = card.role;
-        if (queued) item.dataset.queued = "";
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.seq = String(card.seq);
@@ -250,10 +249,7 @@
         );
         const top = transcriptEl.scrollTop;
         shown = [...cards, ...sent.map(sentCard)];
-        transcriptEl.replaceChildren(
-          moreEl,
-          ...shown.map((card, index) => cardEl(card, index >= cards.length)),
-        );
+        transcriptEl.replaceChildren(moreEl, ...shown.map(cardEl));
         paintedCards = cards;
         paintedSent = sent;
         transcriptEl.scrollTop = follow ? transcriptEl.scrollHeight : top;
@@ -264,6 +260,9 @@
       function remember(text: string) {
         sent = [...sent, { after: cards.at(-1)?.seq ?? 0, text }];
         paintCards();
+        // Sending is deliberate, so it goes to the end of the list whatever
+        // paintCards decided from where the reader had scrolled to.
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
       }
 
       /** The control rides at the top of whichever view is scrolling. The card
@@ -962,11 +961,15 @@
       #status {
         padding: 0 1rem;
       }
+      /* Closed off by the same rule the composer draws, with the same 6px of
+         air on either side of it. */
       header {
         display: flex;
         align-items: center;
         gap: 0.5rem;
         margin: 6px 0;
+        padding-bottom: 6px;
+        border-bottom: 1px solid var(--edge);
       }
       h1 {
         flex: 1;
@@ -1066,11 +1069,6 @@
       #transcript li[data-role="user"] {
         margin-left: 15%;
         background: var(--card-user);
-      }
-      /* Sent from here, not yet in the agent's own file. Dimmed rather than
-         labelled: the state is the card's, not a sentence about it. */
-      #transcript li[data-queued] {
-        opacity: 0.6;
       }
       /* Nothing fills the agent's lane: the same 1px the pane rows use is all
          that separates it from the page. */
@@ -1202,7 +1200,7 @@
         align-items: center;
         gap: 0.5rem;
         padding: 0.35rem 1rem;
-        border-top: 1px solid var(--line, #333);
+        border-top: 1px solid var(--edge);
       }
       /* One line, ellipsised — the treatment .name and .subtitle already use. */
       #draft {

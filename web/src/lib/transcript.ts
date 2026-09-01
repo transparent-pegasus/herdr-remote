@@ -88,16 +88,33 @@ export function sentCard(sent: Sent, index: number): Card {
  *  sent against appears; the agent takes them in the order they were sent, so
  *  the oldest unsettled one is the one that arrived. Matching on the text
  *  cannot work — the card carries the markdown parser's rendering of it, and a
- *  message that was a list or had emphasis comes back without its syntax. */
+ *  message that was a list or had emphasis comes back without its syntax.
+ *
+ *  Called on every poll that changed anything, so it must answer the same way
+ *  twice: what settles a message is recorded by moving the next one's `after`
+ *  past the turn just claimed, not by consuming it. */
 export function settle(sent: Sent[], cards: Card[]): Sent[] {
-	if (sent.length === 0) return sent;
-	let rest = sent;
-	for (const card of cards) {
-		if (card.role !== "user") continue;
-		const at = rest.findIndex((one) => card.seq > one.after);
-		if (at !== -1) rest = rest.filter((_, index) => index !== at);
+	if (sent.length === 0 || cards.length === 0) return sent;
+	const newest = cards[cards.length - 1].seq;
+	const turns = cards.filter((card) => card.role === "user");
+	const rest: Sent[] = [];
+	let claimed = -1;
+	for (const one of sent) {
+		// A transcript whose newest message is older than the one this was sent
+		// against has started its sequence again — a cleared context, a new
+		// session file — so the message is waiting on everything, not on a
+		// number the file will never reach.
+		const after = Math.max(newest < one.after ? -1 : one.after, claimed);
+		const arrival = turns.find((card) => card.seq > after);
+		if (arrival) {
+			claimed = arrival.seq;
+			continue;
+		}
+		rest.push(after === one.after ? one : { ...one, after });
 	}
-	return rest;
+	const same =
+		rest.length === sent.length && rest.every((one, at) => one === sent[at]);
+	return same ? sent : rest;
 }
 
 /** The agent's half is markdown the server rendered; the user's half is text

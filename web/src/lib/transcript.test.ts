@@ -106,25 +106,49 @@ test("a queued message shows below the transcript, escaped and collapsed", () =>
 	expect(card.html).toBe("  a &lt;b&gt;\n  two lines  ");
 });
 
+const arrived = (seq: number, role: "user" | "assistant" = "user") => ({
+	seq,
+	role,
+	preview: "*bullet*",
+	html: "",
+});
+
 test("queued messages settle in the order they were sent", () => {
 	const sent = [
 		{ after: 10, text: "first" },
 		{ after: 10, text: "second" },
 	];
-	const arrived = (seq: number) => ({
-		seq,
-		role: "user" as const,
-		preview: "*bullet*",
-		html: "",
-	});
-	expect(settle(sent, [arrived(11)])).toEqual([{ after: 10, text: "second" }]);
+	expect(settle(sent, [arrived(11)])).toEqual([{ after: 11, text: "second" }]);
 	expect(settle(sent, [arrived(11), arrived(12)])).toEqual([]);
+});
+
+/** The poll calls it again on every page that changed anything, and a second
+ *  call against the same cards used to eat the next queued message. */
+test("settling twice against the same turns settles no more than once", () => {
+	const sent = [
+		{ after: 10, text: "first" },
+		{ after: 10, text: "second" },
+	];
+	const cards = [arrived(11, "assistant"), arrived(12)];
+	const once = settle(sent, cards);
+	expect(once).toHaveLength(1);
+	expect(settle(once, cards)).toBe(once);
+	expect(settle(settle(once, cards), cards)).toHaveLength(1);
+});
+
+/** A cleared context starts the file's sequence again; a queued message must
+ *  not be stranded above a number the transcript will never reach. */
+test("a transcript that restarted its sequence does not strand a message", () => {
+	const sent = [{ after: 400, text: "queued" }];
+	expect(settle(sent, [arrived(0, "assistant")])).toEqual([
+		{ after: -1, text: "queued" },
+	]);
+	expect(settle(sent, [arrived(0, "assistant"), arrived(1)])).toEqual([]);
 });
 
 test("a user turn older than the send does not settle it", () => {
 	const sent = [{ after: 10, text: "queued" }];
-	const older = { seq: 9, role: "user" as const, preview: "old", html: "" };
-	expect(settle(sent, [older])).toBe(sent);
+	expect(settle(sent, [arrived(9), arrived(10, "assistant")])).toBe(sent);
 });
 
 test("nothing queued returns the same array", () => {
