@@ -45,7 +45,7 @@ mod tests {
 }
 
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -101,10 +101,15 @@ fn allowed(agent: &str) -> Option<(&'static str, Shape)> {
 /// agent's own root and this agent's own file shape.
 pub fn guard(agent: &str, path: PathBuf, home: &Path) -> Option<PathBuf> {
     let (root, shaped) = allowed(agent)?;
-    let root = home.join(root).canonicalize().ok()?;
-    let real = path.canonicalize().ok()?;
+    let real = within(&home.join(root), path)?;
     let name = real.file_name().and_then(|name| name.to_str())?;
-    (shaped(name) && real.starts_with(&root)).then_some(real)
+    shaped(name).then_some(real)
+}
+
+fn within(root: &Path, path: PathBuf) -> Option<PathBuf> {
+    let root = root.canonicalize().ok()?;
+    let real = path.canonicalize().ok()?;
+    real.starts_with(root).then_some(real)
 }
 
 /// Claude names a project directory after its cwd, with `/` and `.` replaced.
@@ -275,14 +280,18 @@ fn newest_child(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Read one `meta.json`, or `None` when it is missing or unreadable.
-fn cursor_meta(dir: &Path) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(dir.join("meta.json")).ok()?;
+fn cursor_meta(path: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
 /// A reported Cursor id is a directory name one level below a project. Join
 /// that exact name under each project instead of walking every chat file.
 fn cursor_created_at(chats: &Path, id: &str) -> Option<u64> {
+    let mut components = Path::new(id).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return None;
+    }
     std::fs::read_dir(chats)
         .ok()?
         .flatten()
@@ -291,7 +300,8 @@ fn cursor_created_at(chats: &Path, id: &str) -> Option<u64> {
         .map(|project| project.join(id))
         .filter(|dir| real_dir(dir))
         .find_map(|dir| {
-            cursor_meta(&dir)?
+            let meta = within(chats, dir.join("meta.json"))?;
+            cursor_meta(&meta)?
                 .get("createdAtMs")
                 .and_then(|value| value.as_u64())
         })
@@ -331,7 +341,7 @@ fn cursor_store(
             if !real_dir(&dir) {
                 continue;
             }
-            let Some(meta) = cursor_meta(&dir) else {
+            let Some(meta) = cursor_meta(&dir.join("meta.json")) else {
                 continue;
             };
             if meta.get("cwd").and_then(|v| v.as_str()) != Some(cwd)
@@ -594,6 +604,47 @@ mod resolution_tests {
             }
 
             assert!(resolve(&pane("cursor", Some("reported"), "/repo"), &home).is_none());
+        }
+    }
+
+    #[test]
+    fn cursor_ids_cannot_escape_or_add_path_components() {
+        let home = scratch();
+        let chats = home.join(".cursor/chats");
+        let project = chats.join("p1");
+
+        let candidate = project.join("conversation");
+        touch(&candidate.join("store.db"));
+        std::fs::write(
+            candidate.join("meta.json"),
+            serde_json::json!({ "cwd": "/repo", "hasConversation": true,
+                                "updatedAtMs": 2u64 })
+            .to_string(),
+        )
+        .unwrap();
+
+        let escaped = chats.join("escape");
+        std::fs::create_dir_all(&escaped).unwrap();
+        std::fs::write(
+            escaped.join("meta.json"),
+            serde_json::json!({ "createdAtMs": 1u64 }).to_string(),
+        )
+        .unwrap();
+
+        let outside = home.join("outside/b");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join("meta.json"),
+            serde_json::json!({ "createdAtMs": 1u64 }).to_string(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.parent().unwrap(), project.join("a")).unwrap();
+
+        for id in ["../escape", "/etc", "a/b"] {
+            assert!(
+                resolve(&pane("cursor", Some(id), "/repo"), &home).is_none(),
+                "accepted cursor id {id:?}"
+            );
         }
     }
 
