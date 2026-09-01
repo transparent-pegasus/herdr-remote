@@ -236,6 +236,30 @@ export async function fetchLive(
 	return body;
 }
 
+export async function fetchAgentTick(
+	paneId: string,
+	timeout: () => AbortSignal,
+	current: () => boolean,
+	liveSettled: (live: Live | undefined) => void,
+): Promise<{
+	live: Live | undefined;
+	liveError: unknown;
+	page: Page | "unchanged" | null;
+} | null> {
+	let live: Live | undefined;
+	let liveError: unknown;
+	try {
+		live = await fetchLive(paneId, timeout());
+	} catch (error) {
+		liveError = error;
+	}
+	if (!current()) return null;
+	liveSettled(live);
+	const page = await fetchTranscript(paneId, undefined, timeout());
+	if (!current()) return null;
+	return { live, liveError, page };
+}
+
 /** Zooming gives the pane the whole herdr window: a picker rendered into twenty
  *  columns is destroyed before it is ever read. How wide that ends up being is
  *  the operator's window, not something this code predicts. */

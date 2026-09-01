@@ -1,5 +1,6 @@
 import { expect, test, vi } from "vitest";
 import {
+	fetchAgentTick,
 	fetchLive,
 	fetchSession,
 	fetchTranscript,
@@ -211,6 +212,77 @@ const page = (body: unknown, headers: Record<string, string> = {}) =>
 		status: 200,
 		headers: { "content-type": "application/json", ...headers },
 	});
+
+test("a live timeout still fetches the transcript with a fresh deadline", async () => {
+	const live = new AbortController();
+	const transcript = new AbortController();
+	const signals = [live.signal, transcript.signal];
+	let nextSignal = 0;
+	const seen: Array<AbortSignal | null | undefined> = [];
+	const fetchMock = stubFetch((url, init) => {
+		seen.push(init?.signal);
+		if (url.endsWith("/live")) {
+			throw new DOMException("signal timed out", "TimeoutError");
+		}
+		return page({ messages: [], has_more: false });
+	});
+	vi.stubGlobal("fetch", fetchMock);
+
+	try {
+		await expect(
+			fetchAgentTick(
+				"w1:p1",
+				() => {
+					const signal = signals[nextSignal++];
+					if (!signal) throw new Error("unexpected extra timeout");
+					return signal;
+				},
+				() => true,
+				() => {},
+			),
+		).resolves.toMatchObject({
+			page: { messages: [], has_more: false },
+		});
+	} finally {
+		vi.unstubAllGlobals();
+	}
+
+	expect(seen).toEqual([live.signal, transcript.signal]);
+});
+
+test("a late live rejection from an obsolete watch has no effects", async () => {
+	let rejectLive: (reason?: unknown) => void = () => {};
+	const fetchMock = vi.fn(
+		(input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+			if (String(input).endsWith("/live")) {
+				return new Promise((_resolve, reject) => {
+					rejectLive = reject;
+				});
+			}
+			return Promise.resolve(page({ messages: [], has_more: false }));
+		},
+	);
+	vi.stubGlobal("fetch", fetchMock);
+	let current = true;
+	const liveSettled = vi.fn();
+	const tick = fetchAgentTick(
+		"w1:p1",
+		() => new AbortController().signal,
+		() => current,
+		liveSettled,
+	);
+	current = false;
+	rejectLive(new Error("late live failure"));
+
+	try {
+		await expect(tick).resolves.toBeNull();
+	} finally {
+		vi.unstubAllGlobals();
+	}
+
+	expect(liveSettled).not.toHaveBeenCalled();
+	expect(fetchMock).toHaveBeenCalledTimes(1);
+});
 
 test("a 404 from the transcript route means no transcript, not an error", async () => {
 	vi.stubGlobal(

@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import {
+	agentRawState,
 	append,
 	type Card,
 	following,
@@ -13,6 +14,13 @@ const card = (seq: number, role: Card["role"] = "assistant"): Card => ({
 	role,
 	preview: `p${seq}`,
 	html: `<p>${seq}</p>`,
+});
+
+test("a pane switch followed by a live failure cannot reveal previous raw text", () => {
+	expect(agentRawState()).toEqual({
+		text: "",
+		hidden: true,
+	});
 });
 
 test("append adds only messages the list does not already carry", () => {

@@ -7,6 +7,15 @@ export type Card = {
 
 export type Page = { messages: Card[]; has_more: boolean };
 
+export function agentRawState(screen?: string): {
+	text: string;
+	hidden: boolean;
+} {
+	return screen === undefined
+		? { text: "", hidden: true }
+		: { text: screen, hidden: false };
+}
+
 const same = (a: Card, b: Card): boolean =>
 	a.role === b.role && a.preview === b.preview && a.html === b.html;
 

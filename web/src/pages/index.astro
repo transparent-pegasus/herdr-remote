@@ -137,7 +137,7 @@
     <script>
       import {
         closePane,
-        fetchLive,
+        fetchAgentTick,
         fetchOutput,
         fetchSession,
         fetchTranscript,
@@ -160,6 +160,7 @@
       } from "../lib/api";
       import { href, parseRoute, type Route } from "../lib/route";
       import {
+        agentRawState,
         type Card,
         following,
         modalContent,
@@ -393,6 +394,7 @@
         cards = [];
         paintedCards = [];
         painted = "";
+        logEl.textContent = "";
         lines = LINES;
         transcriptEl.replaceChildren();
         transcriptEl.hidden = true;
@@ -411,8 +413,10 @@
           if (!document.hidden) {
             try {
               await tick(token);
+              if (token !== watches) return;
               if (statusEl.classList.contains("error")) say("");
             } catch (error) {
+              if (token !== watches) return;
               complain(error, "could not read the pane");
             }
           }
@@ -426,26 +430,21 @@
         // and `render()` does not restart a watch whose id is unchanged.
         const pane = current().pane;
         if (!pane || token !== watches) return;
-        const signal = AbortSignal.timeout(15000);
 
-        let live: Live | undefined;
-        let liveError: unknown;
-        if (pane.agent) {
-          try {
-            live = await fetchLive(pane.id, signal);
-            if (token !== watches) return;
-            paintLive(live, pane.state);
-          } catch (error) {
-            liveError = error;
-          }
-        }
-        liveEl.hidden = !pane.agent;
-
-        // A shell has no transcript by definition; asking anyway would spend a
-        // request per tick to be told so.
-        const page = pane.agent
-          ? await fetchTranscript(pane.id, undefined, signal)
-          : null;
+        const polled = pane.agent
+          ? await fetchAgentTick(
+              pane.id,
+              () => AbortSignal.timeout(15000),
+              () => token === watches,
+              (live) => {
+                if (live) paintLive(live, pane.state);
+                liveEl.hidden = false;
+              },
+            )
+          : { live: undefined, liveError: undefined, page: null };
+        if (polled === null) return;
+        const { live, liveError, page } = polled;
+        if (!pane.agent) liveEl.hidden = true;
         if (token !== watches) return;
 
         if (page !== null) {
@@ -461,16 +460,23 @@
           // does not churn, and a shell keeps its scrollback.
           cards = [];
           transcriptEl.hidden = true;
-          logEl.hidden = false;
           if (pane.agent) {
-            if (live) paint(live.screen);
+            const raw = agentRawState(live?.screen);
+            if (raw.hidden) {
+              painted = raw.text;
+              logEl.textContent = raw.text;
+            } else {
+              paint(raw.text);
+            }
+            logEl.hidden = raw.hidden;
             moreEl.hidden = true;
           } else {
+            logEl.hidden = false;
             const output = await fetchOutput(
               pane.id,
               lines,
               "scrollback",
-              signal,
+              AbortSignal.timeout(15000),
             );
             if (token !== watches) return;
             paint(output.text);
