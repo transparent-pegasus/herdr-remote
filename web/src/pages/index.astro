@@ -901,15 +901,11 @@
       :root {
         --edge: color-mix(in srgb, currentColor 15%, transparent);
         --muted: color-mix(in srgb, currentColor 60%, transparent);
-        /* The user's hue and chroma are the favicon's own — 66,249 of its
-           chromatic pixels average 189.3deg — at OKLCH lightness 0.3456, the
-           darkness the mark uses. The agent's is the first draft's own value,
-           kept because the operator prefers it: a near-black that reads as the
-           page rather than as a card, which is the point when only one side of
-           the conversation is being answered. Against white text they measure
-           11.19:1 and 17.04:1. */
+        /* Only the operator's own lane is filled, and its hue and chroma are
+           the favicon's own — 66,249 of its chromatic pixels average 189.3deg
+           — at OKLCH lightness 0.3456, the darkness the mark uses. 11.19:1
+           against white text. The agent's lane is the page itself, outlined. */
         --card-user: #004340;
-        --card-agent: #1c1c1c;
         --full-gap: 1rem;
       }
       /* The page owns its overscroll: a downward drag is the transcript's
@@ -1043,11 +1039,11 @@
         margin-left: 15%;
         background: var(--card-user);
       }
-      /* The agent lane is nearly the page's own colour, so it takes the same
-         1px the pane rows use to stand apart from it. */
+      /* Nothing fills the agent's lane: the same 1px the pane rows use is all
+         that separates it from the page. */
       #transcript li[data-role="assistant"] {
         border: 1px solid var(--edge);
-        background: var(--card-agent);
+        background: transparent;
       }
       /* Plain text in one node, which is what lets the clamp cut at three lines and
          append its ellipsis; markup would give it block children to trip on. */
@@ -1086,15 +1082,8 @@
         border-color: var(--edge);
         border-radius: 0;
         overflow: hidden;
-        color: inherit;
-      }
-      /* Reading a message is that card enlarged, so the sheet is its colour.
-         The screen is the terminal, and keeps the page's own. */
-      #full {
-        background: var(--card-agent);
-      }
-      #screen {
         background: Canvas;
+        color: inherit;
       }
       /* Scoped to [open]: an unscoped display would beat the UA's own
          `dialog:not([open]) { display: none }` and leave both sheets on. */
