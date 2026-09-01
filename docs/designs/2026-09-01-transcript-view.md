@@ -258,9 +258,18 @@ existing `#more` button, prepends, and preserves scroll position.
 rather than the body carrying it for all of them. On the scrolling children — the pane
 list, the card list, the raw log — that is what puts the scrollbar on the page's own edge
 instead of 1rem inside it, with the text still inset. `max-width` moved from 34rem to
-36rem so the reading column is the width it always was. The load control's own air is
-`padding-top: 0.5rem` and the list's `gap` supplies as much below it, so it sits evenly
-between the edge and the oldest card.
+36rem so the reading column is the width it always was.
+
+**Loading earlier output.** A reload icon at the top of the scrolling list, the header's
+own. Where a pointer can drag — `(pointer: coarse)` — it is the drag: `height: var(--pull)`
+gives it only what the gesture gives it, so nothing stands between the top of the list and
+its oldest card until the reader pulls, and the icon turns as it comes. Past 56px, letting
+go loads, and the icon is held at that height until the page comes back so a slow tunnel
+does not look like a gesture that did nothing. `overscroll-behavior-y: contain` on the
+page keeps the browser's own pull-to-refresh out of the way. A pointer that cannot perform
+the drag keeps the icon visible instead — hiding it there would leave no way to reach it —
+with `padding-top: 0.5rem` above and the list's `gap` supplying as much below. The button
+is in the page either way, so a screen reader finds and presses it in both.
 
 **A message sent mid-turn.** An agent queues what arrives while it is answering, and does
 not write that turn to its own file until it takes it — minutes, on a long answer. The

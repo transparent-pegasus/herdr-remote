@@ -850,7 +850,9 @@
 
       // Reading further back keeps the reader where they are: paint() only
       // follows the tail when they were already at it.
-      moreEl.addEventListener("click", async () => {
+      moreEl.addEventListener("click", () => void loadEarlier());
+
+      async function loadEarlier() {
         const paneId = watching;
         const token = watches;
         if (!paneId) return;
@@ -868,7 +870,7 @@
         paintCards();
         transcriptEl.scrollTop = transcriptEl.scrollHeight - fromBottom;
         moreEl.hidden = !page.has_more;
-      });
+      }
 
       // On a touch screen the reload control is not a button to find but a drag
       // from the top of the log: pull down, the icon comes with it, let go past
@@ -916,8 +918,14 @@
         const load = pullFrom !== null && pulled >= PULL_TRIGGER;
         pullFrom = null;
         pulled = 0;
-        moreEl.style.removeProperty("--pull");
-        if (load) moreEl.click();
+        if (!load) {
+          moreEl.style.removeProperty("--pull");
+          return;
+        }
+        // Hold the icon where the drag left it until the page comes back, so a
+        // slow tunnel does not look like a gesture that did nothing.
+        moreEl.style.setProperty("--pull", `${PULL_TRIGGER}px`);
+        void loadEarlier().finally(() => moreEl.style.removeProperty("--pull"));
       });
 
       refreshEl.addEventListener("click", () => {
@@ -1024,6 +1032,19 @@
         background: transparent;
         color: inherit;
         cursor: pointer;
+      }
+      /* Where the drag exists, the control is the drag: it takes only the
+         height the pull gives it, so nothing stands between the top of the
+         list and its oldest card until the reader asks for more. A pointer
+         that cannot perform the drag keeps the icon — hiding it there would
+         leave no way to reach it. The button itself stays in the page, so a
+         screen reader can still find and press it. */
+      @media (pointer: coarse) {
+        #more {
+          height: var(--pull, 0px);
+          padding: 0;
+          overflow: hidden;
+        }
       }
       #more svg {
         width: 20px;
