@@ -460,6 +460,18 @@ async fn open(State(state): State<AppState>, Path(pane_id): Path<String>) -> Api
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Remember the newest close for a pane. Two closes can take their tickets in
+/// one order and reach the cache lock in the other; overwriting would let the
+/// older one lower the tombstone, and a request holding a ticket between them
+/// would then pass the check and resurrect the entry it was meant to drop.
+fn record_close(cache: &mut TranscriptCache, pane_id: &str, ticket: u64) {
+    let last = cache
+        .last_close
+        .entry(pane_id.to_string())
+        .or_insert(ticket);
+    *last = (*last).max(ticket);
+}
+
 async fn close(
     State(state): State<AppState>,
     Path(pane_id): Path<String>,
@@ -473,7 +485,7 @@ async fn close(
             )
         })?;
         cache.entries.remove(&pane_id);
-        cache.last_close.insert(pane_id.clone(), ticket);
+        record_close(&mut cache, &pane_id, ticket);
     }
     let mut slot = state.zoomed.0.lock().await;
     if slot.as_deref() != Some(pane_id.as_str()) {
@@ -1123,6 +1135,16 @@ mod tests {
 
         assert!(matches!(result, Ok(None)));
         assert!(!is_cached(&state.transcripts, "pane"));
+    }
+
+    /// The tombstone must survive a close whose ticket is older than one already
+    /// recorded — the ordering the lock does not guarantee.
+    #[test]
+    fn an_out_of_order_close_cannot_lower_the_tombstone() {
+        let mut cache = TranscriptCache::default();
+        record_close(&mut cache, "pane", 5);
+        record_close(&mut cache, "pane", 3);
+        assert_eq!(cache.last_close.get("pane"), Some(&5));
     }
 
     #[test]
