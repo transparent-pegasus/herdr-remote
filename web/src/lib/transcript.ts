@@ -84,33 +84,56 @@ export function sentCard(sent: Sent, index: number): Card {
 	};
 }
 
+/** Letters and digits alone. The card carries the markdown parser's rendering
+ *  of what was typed — `* one\n* two` arrives as `one two` — so anything the
+ *  parser can drop has to be dropped from both sides before they are compared. */
+const key = (text: string): string =>
+	text.replace(/[^\p{L}\p{N}]/gu, "").toLowerCase();
+
+/** How many queued messages one arriving turn accounts for. An agent may hand
+ *  a queue over one turn at a time or fold the whole of it into a single turn,
+ *  and that turn's own text is the only thing that says which. Zero means the
+ *  text settled nothing — a link or an image leaves the parser's version too
+ *  different, and a message past the preview's 300-character cap cannot match
+ *  at all — and the caller falls back to one. */
+function covered(preview: string, queued: Sent[]): number {
+	let left = key(preview);
+	let taken = 0;
+	while (taken < queued.length) {
+		const one = key(queued[taken].text);
+		if (one === "" || !left.startsWith(one)) break;
+		left = left.slice(one.length);
+		taken += 1;
+	}
+	return taken;
+}
+
 /** A queued message settles when a user turn newer than the transcript it was
- *  sent against appears; the agent takes them in the order they were sent, so
- *  the oldest unsettled one is the one that arrived. Matching on the text
- *  cannot work — the card carries the markdown parser's rendering of it, and a
- *  message that was a list or had emphasis comes back without its syntax.
+ *  sent against appears; agents take them in the order they were sent, so the
+ *  oldest unsettled one is the one that arrived.
  *
  *  Called on every poll that changed anything, so it must answer the same way
  *  twice: what settles a message is recorded by moving the next one's `after`
- *  past the turn just claimed, not by consuming it. */
+ *  past the turn just claimed, not by consuming that turn. */
 export function settle(sent: Sent[], cards: Card[]): Sent[] {
 	if (sent.length === 0 || cards.length === 0) return sent;
 	const newest = cards[cards.length - 1].seq;
 	const turns = cards.filter((card) => card.role === "user");
-	const rest: Sent[] = [];
+	let rest = sent;
 	let claimed = -1;
-	for (const one of sent) {
+	for (let head = rest[0]; head !== undefined; head = rest[0]) {
 		// A transcript whose newest message is older than the one this was sent
 		// against has started its sequence again — a cleared context, a new
-		// session file — so the message is waiting on everything, not on a
-		// number the file will never reach.
-		const after = Math.max(newest < one.after ? -1 : one.after, claimed);
+		// session file — so the message waits on everything, not on a number
+		// the file will never reach.
+		const after = Math.max(newest < head.after ? -1 : head.after, claimed);
 		const arrival = turns.find((card) => card.seq > after);
-		if (arrival) {
-			claimed = arrival.seq;
-			continue;
+		if (arrival === undefined) {
+			if (after !== head.after) rest = [{ ...head, after }, ...rest.slice(1)];
+			break;
 		}
-		rest.push(after === one.after ? one : { ...one, after });
+		claimed = arrival.seq;
+		rest = rest.slice(Math.max(covered(arrival.preview, rest), 1));
 	}
 	const same =
 		rest.length === sent.length && rest.every((one, at) => one === sent[at]);

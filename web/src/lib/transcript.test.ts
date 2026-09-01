@@ -155,3 +155,49 @@ test("nothing queued returns the same array", () => {
 	const empty: Sent[] = [];
 	expect(settle(empty, [])).toBe(empty);
 });
+
+/** Some agents hand the whole queue over as one turn. */
+test("one turn carrying every queued message settles all of them", () => {
+	const sent = [
+		{ after: 10, text: "* list one\n* list two" },
+		{ after: 10, text: "and a third" },
+	];
+	const together = {
+		seq: 11,
+		role: "user" as const,
+		preview: "list one list two and a third",
+		html: "",
+	};
+	expect(settle(sent, [together])).toEqual([]);
+	expect(settle(settle(sent, [together]), [together])).toEqual([]);
+});
+
+/** And some hand it over one at a time, which the same turn text decides. */
+test("one turn carrying only the first leaves the rest queued", () => {
+	const sent = [
+		{ after: 10, text: "* list one\n* list two" },
+		{ after: 10, text: "and a third" },
+	];
+	const first = {
+		seq: 11,
+		role: "user" as const,
+		preview: "list one list two",
+		html: "",
+	};
+	expect(settle(sent, [first])).toEqual([{ after: 11, text: "and a third" }]);
+});
+
+/** A turn whose text the parser left unrecognisable still settles exactly one. */
+test("a turn the text cannot account for settles one message", () => {
+	const sent = [
+		{ after: 10, text: "[see the docs](https://example.test)" },
+		{ after: 10, text: "second" },
+	];
+	const arrival = {
+		seq: 11,
+		role: "user" as const,
+		preview: "see the docs",
+		html: "",
+	};
+	expect(settle(sent, [arrival])).toEqual([{ after: 11, text: "second" }]);
+});

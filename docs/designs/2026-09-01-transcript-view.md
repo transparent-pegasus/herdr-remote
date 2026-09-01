@@ -268,11 +268,15 @@ page therefore keeps its own copy of anything sent from here and shows it below 
 card, exactly as a delivered one, which is where it will land: after the answer still
 being written. Sending scrolls the list to it.
 
-It settles when a user turn newer than the transcript it was sent against appears, not
-when one matching its text does — the card carries the markdown parser's rendering, so
-`* one\n* two` comes back as `one two`, and matching on text would leave the card
-standing for good. Agents take queued messages in order, so the oldest unsettled copy is
-the one that arrived.
+It settles when a user turn newer than the transcript it was sent against appears. Agents
+take queued messages in order, so the oldest unsettled copy is the one that arrived — but
+not always one at a time: the same agent will hand a queue over one turn per message on
+one occasion and fold the whole of it into a single turn on another, and both were seen.
+The arriving turn's own text is what says which, compared on letters and digits alone
+because the card carries the markdown parser's rendering — `* one\n* two` comes back as
+`one two`. When the text accounts for nothing (a link, an image, or a message past the
+preview's 300-character cap) the turn settles exactly one, which is the behaviour that
+holds without any text at all.
 
 `settle` runs on every poll that changed anything, so it has to answer the same way twice.
 It records a settlement by moving the next queued message's `after` past the turn just
