@@ -187,6 +187,9 @@
         modalContent,
         prepend,
         replaceTail,
+        type Sent,
+        sentCard,
+        settle,
       } from "../lib/transcript";
 
       const listEl = document.querySelector<HTMLDivElement>("#list")!;
@@ -213,11 +216,17 @@
       const fullBodyEl = fullEl.querySelector<HTMLDivElement>(".body")!;
 
       let cards: Card[] = [];
+      let sent: Sent[] = [];
       let paintedCards: Card[] = [];
+      let paintedSent: Sent[] = [];
+      /** What the list is showing: the transcript's own cards, then whatever
+       *  was sent from here and the agent has not written down yet. */
+      let shown: Card[] = [];
 
-      function cardEl(card: Card) {
+      function cardEl(card: Card, queued: boolean) {
         const item = document.createElement("li");
         item.dataset.role = card.role;
+        if (queued) item.dataset.queued = "";
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.seq = String(card.seq);
@@ -233,16 +242,28 @@
       /** Rebuild only when the merge produced a different array. Thirty nodes is
        *  cheap; yanking the reader's scroll position every three seconds is not. */
       function paintCards() {
-        if (cards === paintedCards) return;
+        if (cards === paintedCards && sent === paintedSent) return;
         const follow = following(
           transcriptEl.scrollTop,
           transcriptEl.clientHeight,
           transcriptEl.scrollHeight,
         );
         const top = transcriptEl.scrollTop;
-        transcriptEl.replaceChildren(moreEl, ...cards.map(cardEl));
+        shown = [...cards, ...sent.map(sentCard)];
+        transcriptEl.replaceChildren(
+          moreEl,
+          ...shown.map((card, index) => cardEl(card, index >= cards.length)),
+        );
         paintedCards = cards;
+        paintedSent = sent;
         transcriptEl.scrollTop = follow ? transcriptEl.scrollHeight : top;
+      }
+
+      /** Keep our own copy of what we just sent, against the transcript as it
+       *  stands, so it can be shown until the agent's file catches up. */
+      function remember(text: string) {
+        sent = [...sent, { after: cards.at(-1)?.seq ?? 0, text }];
+        paintCards();
       }
 
       /** The control rides at the top of whichever view is scrolling. The card
@@ -274,7 +295,7 @@
           "button[data-seq]",
         );
         const seq = Number(button?.dataset.seq);
-        const card = cards.find((candidate) => candidate.seq === seq);
+        const card = shown.find((candidate) => candidate.seq === seq);
         if (card) openCard(card);
       });
 
@@ -478,7 +499,10 @@
         if (watching && watching !== pane?.id) closePane(watching);
         watching = pane?.id ?? null;
         cards = [];
+        sent = [];
         paintedCards = [];
+        paintedSent = [];
+        shown = [];
         painted = "";
         logEl.textContent = "";
         lines = LINES;
@@ -539,6 +563,7 @@
           logEl.hidden = true;
           if (page !== "unchanged") {
             cards = replaceTail(cards, page.messages);
+            sent = settle(sent, cards);
             paintCards();
             moreEl.hidden = !page.has_more;
           }
@@ -779,12 +804,16 @@
         );
       });
       goEl.addEventListener("click", () =>
-        act(goEl, "go", (id) => sendPrompt(id, "go")),
+        act(goEl, "go", async (id) => {
+          await sendPrompt(id, "go");
+          remember("go");
+        }),
       );
       pushEl.addEventListener("click", () =>
-        act(pushEl, "don't stop until completion", (id) =>
-          sendPrompt(id, "don't stop until completion"),
-        ),
+        act(pushEl, "don't stop until completion", async (id) => {
+          await sendPrompt(id, "don't stop until completion");
+          remember("don't stop until completion");
+        }),
       );
       upEl.addEventListener("click", () =>
         act(upEl, "up", (id) => pressArrow(id, "up")),
@@ -812,6 +841,7 @@
           await sendPrompt(id, text);
           textEl.value = "";
           syncSend();
+          remember(text);
         });
       });
 
@@ -901,11 +931,9 @@
       :root {
         --edge: color-mix(in srgb, currentColor 15%, transparent);
         --muted: color-mix(in srgb, currentColor 60%, transparent);
-        /* Only the operator's own lane is filled, and its hue and chroma are
-           the favicon's own — 66,249 of its chromatic pixels average 189.3deg
-           — at OKLCH lightness 0.3456, the darkness the mark uses. 11.19:1
-           against white text. The agent's lane is the page itself, outlined. */
-        --card-user: #004340;
+        /* Only the operator's own lane is filled. 5.52:1 against white text,
+           past AA. The agent's lane is the page itself, outlined. */
+        --card-user: #606b69;
         --full-gap: 1rem;
       }
       /* The page owns its overscroll: a downward drag is the transcript's
@@ -1038,6 +1066,11 @@
       #transcript li[data-role="user"] {
         margin-left: 15%;
         background: var(--card-user);
+      }
+      /* Sent from here, not yet in the agent's own file. Dimmed rather than
+         labelled: the state is the card's, not a sentence about it. */
+      #transcript li[data-queued] {
+        opacity: 0.6;
       }
       /* Nothing fills the agent's lane: the same 1px the pane rows use is all
          that separates it from the page. */

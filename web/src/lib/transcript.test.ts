@@ -6,6 +6,9 @@ import {
 	following,
 	modalContent,
 	prepend,
+	type Sent,
+	sentCard,
+	settle,
 	replaceTail,
 } from "./transcript";
 
@@ -91,4 +94,40 @@ test("the tail is followed only from the tail", () => {
 	// Eight pixels of slop, matching the existing raw-output view.
 	expect(following(915, 80, 1000)).toBe(true);
 	expect(following(500, 80, 1000)).toBe(false);
+});
+
+test("a queued message shows below the transcript, escaped and collapsed", () => {
+	const card = sentCard({ after: 12, text: "  a <b>\n  two lines  " }, 0);
+	expect(card.role).toBe("user");
+	expect(card.seq).toBeGreaterThan(12);
+	expect(card.preview).toBe("a <b> two lines");
+	// The modal shows what was typed, whitespace and all; only the preview is
+	// collapsed, the way the server collapses its own.
+	expect(card.html).toBe("  a &lt;b&gt;\n  two lines  ");
+});
+
+test("queued messages settle in the order they were sent", () => {
+	const sent = [
+		{ after: 10, text: "first" },
+		{ after: 10, text: "second" },
+	];
+	const arrived = (seq: number) => ({
+		seq,
+		role: "user" as const,
+		preview: "*bullet*",
+		html: "",
+	});
+	expect(settle(sent, [arrived(11)])).toEqual([{ after: 10, text: "second" }]);
+	expect(settle(sent, [arrived(11), arrived(12)])).toEqual([]);
+});
+
+test("a user turn older than the send does not settle it", () => {
+	const sent = [{ after: 10, text: "queued" }];
+	const older = { seq: 9, role: "user" as const, preview: "old", html: "" };
+	expect(settle(sent, [older])).toBe(sent);
+});
+
+test("nothing queued returns the same array", () => {
+	const empty: Sent[] = [];
+	expect(settle(empty, [])).toBe(empty);
 });

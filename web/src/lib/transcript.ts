@@ -61,6 +61,45 @@ export function replaceTail(existing: Card[], incoming: Card[]): Card[] {
 	return unchanged ? existing : replaced;
 }
 
+export type Sent = { after: number; text: string };
+
+const escapeText = (text: string): string =>
+	text
+		.replaceAll("&", "&amp;")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;")
+		.replaceAll('"', "&quot;");
+
+/** A message sent mid-turn is queued by the agent and reaches its own file only
+ *  when the agent takes it, which can be minutes. Until then it is shown from
+ *  the copy we already have, below everything the file holds — which is where
+ *  it will land, after the answer the agent is still writing. The preview is
+ *  collapsed and capped the way the server collapses and caps its own. */
+export function sentCard(sent: Sent, index: number): Card {
+	return {
+		seq: Number.MAX_SAFE_INTEGER - index,
+		role: "user",
+		preview: sent.text.replace(/\s+/g, " ").trim().slice(0, 300),
+		html: escapeText(sent.text),
+	};
+}
+
+/** A queued message settles when a user turn newer than the transcript it was
+ *  sent against appears; the agent takes them in the order they were sent, so
+ *  the oldest unsettled one is the one that arrived. Matching on the text
+ *  cannot work — the card carries the markdown parser's rendering of it, and a
+ *  message that was a list or had emphasis comes back without its syntax. */
+export function settle(sent: Sent[], cards: Card[]): Sent[] {
+	if (sent.length === 0) return sent;
+	let rest = sent;
+	for (const card of cards) {
+		if (card.role !== "user") continue;
+		const at = rest.findIndex((one) => card.seq > one.after);
+		if (at !== -1) rest = rest.filter((_, index) => index !== at);
+	}
+	return rest;
+}
+
 /** The agent's half is markdown the server rendered; the user's half is text
  *  the server escaped. Both arrive as HTML, and only the user's needs the
  *  whitespace of what they actually typed. */
