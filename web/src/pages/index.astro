@@ -223,9 +223,10 @@
        *  was sent from here and the agent has not written down yet. */
       let shown: Card[] = [];
 
-      function cardEl(card: Card) {
+      function cardEl(card: Card, queued: boolean) {
         const item = document.createElement("li");
         item.dataset.role = card.role;
+        if (queued) item.dataset.queued = "";
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.seq = String(card.seq);
@@ -249,7 +250,10 @@
         );
         const top = transcriptEl.scrollTop;
         shown = [...cards, ...sent.map(sentCard)];
-        transcriptEl.replaceChildren(moreEl, ...shown.map(cardEl));
+        transcriptEl.replaceChildren(
+          moreEl,
+          ...shown.map((card, index) => cardEl(card, index >= cards.length)),
+        );
         paintedCards = cards;
         paintedSent = sent;
         transcriptEl.scrollTop = follow ? transcriptEl.scrollHeight : top;
@@ -1069,6 +1073,12 @@
       #transcript li[data-role="user"] {
         margin-left: 15%;
         background: var(--card-user);
+      }
+      /* Sent from here and not yet in the agent's own file. It clears the
+         moment the agent's own copy of the turn arrives, which is what
+         `settle` decides. */
+      #transcript li[data-queued] {
+        opacity: 0.6;
       }
       /* Nothing fills the agent's lane: the same 1px the pane rows use is all
          that separates it from the page. */
