@@ -37,9 +37,26 @@ impl TranscriptIdentity {
     }
 }
 
-type ResolvedTranscript = (transcript::Source, Arc<Mutex<Transcript>>);
-type CacheEntry = (TranscriptIdentity, Option<ResolvedTranscript>);
+enum CachedTranscript {
+    /// The token lets close or a newer identity invalidate work outside the map lock.
+    Resolving(Arc<()>),
+    Ready(Arc<Mutex<Transcript>>),
+}
+
+type CacheEntry = (TranscriptIdentity, CachedTranscript);
 type Cache = Arc<Mutex<HashMap<String, CacheEntry>>>;
+
+fn owns_resolution(
+    entry: Option<&CacheEntry>,
+    identity: &TranscriptIdentity,
+    ticket: &Arc<()>,
+) -> bool {
+    matches!(
+        entry,
+        Some((cached, CachedTranscript::Resolving(current)))
+            if cached == identity && Arc::ptr_eq(current, ticket)
+    )
+}
 
 /// The single pane this server has zoomed. A `tokio` mutex, because the
 /// transition awaits herdr while holding it: two concurrent opens must not
@@ -257,30 +274,54 @@ fn take_window(
     before: Option<u64>,
     limit: usize,
 ) -> anyhow::Result<Option<(String, Vec<transcript::Message>, bool)>> {
-    let cached = {
-        let map = cache
+    let (cached, ticket) = {
+        let mut map = cache
             .lock()
             .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
-        map.get(&key)
-            .filter(|(cached, _)| *cached == identity)
-            .map(|(_, resolved)| {
-                resolved
-                    .as_ref()
-                    .map(|(_, transcript)| Arc::clone(transcript))
-            })
+        match map.get(&key) {
+            Some((cached, CachedTranscript::Ready(transcript))) if *cached == identity => {
+                (Some(Arc::clone(transcript)), None)
+            }
+            Some((cached, CachedTranscript::Resolving(_))) if *cached == identity => {
+                return Ok(None);
+            }
+            _ => {
+                let ticket = Arc::new(());
+                map.insert(
+                    key.clone(),
+                    (
+                        identity.clone(),
+                        CachedTranscript::Resolving(Arc::clone(&ticket)),
+                    ),
+                );
+                (None, Some(ticket))
+            }
+        }
     };
     let entry = match cached {
-        Some(Some(entry)) => entry,
-        Some(None) => return Ok(None),
+        Some(entry) => entry,
         None => {
+            let ticket = ticket.expect("an uncached resolution has a ticket");
             let Some(source) = transcript::resolve(&identity.pane(), &home) else {
+                let mut map = cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
+                if owns_resolution(map.get(&key), &identity, &ticket) {
+                    map.remove(&key);
+                }
                 return Ok(None);
             };
-            let entry = Arc::new(Mutex::new(Transcript::open(source.clone())));
-            cache
+            let entry = Arc::new(Mutex::new(Transcript::open(source)));
+            let mut map = cache
                 .lock()
-                .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?
-                .insert(key.clone(), (identity, Some((source, Arc::clone(&entry)))));
+                .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
+            if !owns_resolution(map.get(&key), &identity, &ticket) {
+                return Ok(None);
+            }
+            map.insert(
+                key.clone(),
+                (identity, CachedTranscript::Ready(Arc::clone(&entry))),
+            );
             entry
         }
     };
@@ -295,8 +336,9 @@ fn take_window(
                 .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
             if map
                 .get(&key)
-                .and_then(|(_, resolved)| resolved.as_ref())
-                .is_some_and(|(_, cached)| Arc::ptr_eq(cached, &entry))
+                .is_some_and(|(_, cached)| {
+                    matches!(cached, CachedTranscript::Ready(cached) if Arc::ptr_eq(cached, &entry))
+                })
             {
                 map.remove(&key);
             }
@@ -665,6 +707,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     #[test]
     fn scrollback_asks_herdr_to_unwrap() {
@@ -705,10 +748,13 @@ mod tests {
         identity: &TranscriptIdentity,
         source: transcript::Source,
     ) -> Arc<Mutex<Transcript>> {
-        let transcript = Arc::new(Mutex::new(Transcript::open(source.clone())));
+        let transcript = Arc::new(Mutex::new(Transcript::open(source)));
         cache.lock().unwrap().insert(
             key.into(),
-            (identity.clone(), Some((source, Arc::clone(&transcript)))),
+            (
+                identity.clone(),
+                CachedTranscript::Ready(Arc::clone(&transcript)),
+            ),
         );
         transcript
     }
@@ -736,6 +782,45 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    fn blocking_codex_rollout(
+        home: &std::path::Path,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let rollout = home
+            .join(".codex/sessions/2026/09/01")
+            .join("rollout-2026-09-01T00-00-00-session.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&rollout)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let (write_tx, write_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut pipe = std::fs::OpenOptions::new()
+                .write(true)
+                .open(rollout)
+                .unwrap();
+            opened_tx.send(()).unwrap();
+            write_rx.recv().unwrap();
+            writeln!(
+                pipe,
+                "{}",
+                serde_json::json!({ "type": "session_meta",
+                                    "payload": { "cwd": "/repo" } })
+            )
+            .unwrap();
+        });
+        (opened_rx, write_tx, writer)
     }
 
     fn newest_text(
@@ -973,6 +1058,71 @@ mod tests {
             Ok(StatusCode::NO_CONTENT)
         );
         assert!(!state.transcripts.lock().unwrap().contains_key("pane"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_during_resolution_does_not_reinsert_the_transcript() {
+        let home = scratch_home("close-during-resolution");
+        let state = AppState::default();
+        let worker_cache = state.transcripts.clone();
+        let identity = TranscriptIdentity {
+            agent: "codex".into(),
+            ..transcript_identity()
+        };
+        let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
+        let worker = std::thread::spawn(move || {
+            take_window(worker_cache, "pane".into(), identity, home, None, 30)
+        });
+
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            close(State(state.clone()), Path("pane".into())).await,
+            Ok(StatusCode::NO_CONTENT)
+        );
+        write_tx.send(()).unwrap();
+        writer.join().unwrap();
+
+        assert!(matches!(worker.join().unwrap(), Ok(None)));
+        assert!(!state.transcripts.lock().unwrap().contains_key("pane"));
+    }
+
+    #[test]
+    fn an_older_resolution_cannot_replace_a_newer_identity() {
+        let home = scratch_home("superseded-resolution");
+        let cache = Cache::default();
+        let old_cache = cache.clone();
+        let old_identity = TranscriptIdentity {
+            agent: "codex".into(),
+            ..transcript_identity()
+        };
+        let old_home = home.clone();
+        let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
+        let old = std::thread::spawn(move || {
+            take_window(old_cache, "pane".into(), old_identity, old_home, None, 30)
+        });
+
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        write_claude(&home, "new.jsonl", "new");
+        let new_identity = transcript_identity();
+        assert_eq!(
+            newest_text(&cache, &new_identity, &home).as_deref(),
+            Some("new")
+        );
+        write_tx.send(()).unwrap();
+        writer.join().unwrap();
+
+        assert!(matches!(old.join().unwrap(), Ok(None)));
+        assert!(
+            cache
+                .lock()
+                .unwrap()
+                .get("pane")
+                .is_some_and(|(identity, _)| identity == &new_identity)
+        );
     }
 
     #[test]
