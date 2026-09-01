@@ -256,6 +256,7 @@
           moreEl,
           ...shown.map((card, index) => cardEl(card, index >= cards.length)),
         );
+        markClipped();
         paintedCards = cards;
         paintedSent = sent;
         emptyEl.hidden = shown.length > 0;
@@ -302,11 +303,32 @@
         fullBodyEl.focus();
       }
 
+      /** The clamp is the only thing the sheet adds: a card showing all three
+       *  lines of its message is already the whole message, so a tap on it
+       *  leaves the words where they are and lets the reader select them.
+       *  Measured at click time, because the clamp bites or not by width. */
+      function clipped(button: HTMLButtonElement) {
+        const preview = button.querySelector<HTMLParagraphElement>(".preview");
+        return !!preview && preview.scrollHeight > preview.clientHeight + 1;
+      }
+
+      /** The cursor says which cards have more to show. Set after every paint
+       *  and again when the width changes, since that is what moves a message
+       *  across the three-line line. */
+      function markClipped() {
+        for (const button of transcriptEl.querySelectorAll<HTMLButtonElement>(
+          "button[data-seq]",
+        )) {
+          button.toggleAttribute("data-clipped", clipped(button));
+        }
+      }
+
       transcriptEl.addEventListener("click", (event) => {
         const button = (event.target as Element | null)?.closest<HTMLButtonElement>(
           "button[data-seq]",
         );
-        const seq = Number(button?.dataset.seq);
+        if (!button || !clipped(button)) return;
+        const seq = Number(button.dataset.seq);
         const card = shown.find((candidate) => candidate.seq === seq);
         if (card) openCard(card);
       });
@@ -404,6 +426,7 @@
       // A rotation or an on-screen keyboard moves the composer and changes what
       // fits; both sheets are measured against it.
       addEventListener("resize", () => {
+        markClipped();
         if (!fullEl.open && !screenEl.open) return;
         sizeSheets();
         fitScreen();
@@ -1118,6 +1141,15 @@
         background: transparent;
         font: inherit;
         text-align: left;
+        cursor: text;
+        /* A button's own text is unselectable by UA rule; a card is words the
+           reader may want to take with them. */
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      /* Only a clamped card has a sheet behind it; the rest are already the
+         whole message. */
+      #transcript li > button[data-clipped] {
         cursor: pointer;
       }
       #transcript li[data-role="user"] {
