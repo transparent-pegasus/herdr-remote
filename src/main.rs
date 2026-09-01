@@ -37,8 +37,6 @@ impl TranscriptIdentity {
     }
 }
 
-/// A cached miss is meaningful too: resolving walks agent-owned directories,
-/// so the same pane identity must not repeat that work every three seconds.
 type ResolvedTranscript = (transcript::Source, Arc<Mutex<Transcript>>);
 type CacheEntry = (TranscriptIdentity, Option<ResolvedTranscript>);
 type Cache = Arc<Mutex<HashMap<String, CacheEntry>>>;
@@ -258,20 +256,14 @@ fn take_window(
         Some(Some(entry)) => entry,
         Some(None) => return Ok(None),
         None => {
-            let resolved = transcript::resolve(&identity.pane(), &home).map(|source| {
-                let transcript = Arc::new(Mutex::new(Transcript::open(source.clone())));
-                (source, transcript)
-            });
-            let entry = resolved
-                .as_ref()
-                .map(|(_, transcript)| Arc::clone(transcript));
+            let Some(source) = transcript::resolve(&identity.pane(), &home) else {
+                return Ok(None);
+            };
+            let entry = Arc::new(Mutex::new(Transcript::open(source.clone())));
             cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?
-                .insert(key.clone(), (identity, resolved));
-            let Some(entry) = entry else {
-                return Ok(None);
-            };
+                .insert(key.clone(), (identity, Some((source, Arc::clone(&entry)))));
             entry
         }
     };
@@ -880,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn a_resolution_miss_is_reused_until_the_identity_changes() {
+    fn a_transcript_created_after_a_resolution_miss_is_found() {
         let home = scratch_home("resolution-miss");
         let cache = Cache::default();
         let identity = transcript_identity();
@@ -888,14 +880,8 @@ mod tests {
         assert_eq!(newest_text(&cache, &identity, &home), None);
 
         write_claude(&home, "session.jsonl", "ready");
-        assert_eq!(newest_text(&cache, &identity, &home), None);
-
-        let changed = TranscriptIdentity {
-            title: Some("new title".into()),
-            ..identity
-        };
         assert_eq!(
-            newest_text(&cache, &changed, &home).as_deref(),
+            newest_text(&cache, &identity, &home).as_deref(),
             Some("ready")
         );
     }
