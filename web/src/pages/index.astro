@@ -961,13 +961,13 @@
       #status {
         padding: 0 1rem;
       }
-      /* Closed off by the same rule the composer draws, with the same 6px of
-         air on either side of it. */
+      /* Closed off by the same rule the composer draws. Nothing below the
+         rule: what follows brings its own air, or sits against it. */
       header {
         display: flex;
         align-items: center;
         gap: 0.5rem;
-        margin: 6px 0;
+        margin: 6px 0 0;
         padding-bottom: 6px;
         border-bottom: 1px solid var(--edge);
       }
