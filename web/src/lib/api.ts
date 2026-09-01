@@ -123,6 +123,13 @@ export function paneSubtitle(pane: Pane): string {
 	return pane.agent ? `${pane.agent} · ${pane.state}` : "shell";
 }
 
+/** Which pane is being read, in the one place that is always on screen. A
+ *  shell has nothing to prefix, and the state is left to the indicators —
+ *  the hammer, the stop button's own icon — rather than said in words. */
+export function paneTitle(pane: Pane): string {
+	return pane.agent ? `${pane.agent} · ${pane.label}` : pane.label;
+}
+
 /** The stop button interrupts an active turn and clears an inactive one. */
 export function stopPresentation(state: string) {
 	const interrupts = state === "working";

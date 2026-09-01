@@ -9,6 +9,7 @@ import {
 	openPane,
 	type Pane,
 	paneSubtitle,
+	paneTitle,
 	pressArrow,
 	stateIndicator,
 	stopPresentation,
@@ -102,6 +103,16 @@ test("agent panes show agent and state", () => {
 
 test("agentless panes read as a plain shell", () => {
 	expect(paneSubtitle(pane())).toBe("shell");
+});
+
+test("an agent pane is titled by its agent and its own label", () => {
+	expect(paneTitle(pane({ agent: "claude", state: "working" }))).toBe(
+		"claude · orchestrator",
+	);
+});
+
+test("a shell pane is titled by its label alone", () => {
+	expect(paneTitle(pane())).toBe("orchestrator");
 });
 
 test("a working pane presents the stop action with a hand", () => {

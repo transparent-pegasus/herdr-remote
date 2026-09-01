@@ -167,6 +167,7 @@
         type Live,
         openPane,
         paneSubtitle,
+        paneTitle,
         pressArrow,
         pressEnter,
         sendPrompt,
@@ -301,14 +302,27 @@
         );
       }
 
+      /** `clientWidth` and `clientHeight` carry the padding, and a screen
+       *  scaled against those loses that much off its right and bottom. */
+      function contentBox(el: HTMLElement) {
+        const style = getComputedStyle(el);
+        const shrink = (size: number, a: string, b: string) =>
+          size - parseFloat(a) - parseFloat(b);
+        return {
+          width: shrink(el.clientWidth, style.paddingLeft, style.paddingRight),
+          height: shrink(el.clientHeight, style.paddingTop, style.paddingBottom),
+        };
+      }
+
       /** Scaled, not scrolled: the screen is a grid of characters whose boxes
        *  wrapping would break, and the reader wants the whole of it at once. */
       function fitScreen() {
         if (!screenEl.open) return;
         screenBodyEl.style.setProperty("--fit", "1");
+        const box = contentBox(screenViewEl);
         const scale = Math.min(
-          screenViewEl.clientWidth / (screenBodyEl.scrollWidth || 1),
-          screenViewEl.clientHeight / (screenBodyEl.scrollHeight || 1),
+          box.width / (screenBodyEl.scrollWidth || 1),
+          box.height / (screenBodyEl.scrollHeight || 1),
           1,
         );
         screenBodyEl.style.setProperty("--fit", String(scale));
@@ -587,8 +601,9 @@
           return;
         }
 
-        headingEl.textContent =
-          pane?.label ?? tab?.label ?? workspace?.label ?? "Herdr Remote";
+        headingEl.textContent = pane
+          ? paneTitle(pane)
+          : (tab?.label ?? workspace?.label ?? "Herdr Remote");
         backEl.hidden = !workspace;
         backEl.href = pane
           ? href({ workspaceId: workspace!.id, tabId: tab!.id })
@@ -623,7 +638,10 @@
           if (pane) textEl.focus();
         }
 
-        targetEl.textContent = pane ? paneSubtitle(pane) : "Pick a pane first.";
+        // Which pane, and what it is doing, are the heading's and the
+        // indicators' job; all this line has left to say is that neither
+        // exists yet.
+        targetEl.textContent = pane ? "" : "Pick a pane first.";
         textEl.disabled = !pane;
         // "go" and "don't stop until completion" are instructions to an agent.
         // A plain shell would run them as a command line, and the apostrophe
@@ -891,7 +909,6 @@
         --card-user: #004340;
         --card-agent: #393939;
         --full-gap: 1rem;
-        --sheet-edge: color-mix(in srgb, currentColor 50%, transparent);
       }
       /* The page owns its overscroll: a downward drag is the transcript's
          "load earlier" gesture, not the browser's reload. */
@@ -1032,7 +1049,7 @@
          may act while one is open: a message is read with showModal(), which
          inerts the controls beneath it, and the screen with show(), because a
          picker on it is answered with those very controls. The only edges
-         either draws are the two shadows. */
+         either draws are the two the composer already draws. */
       #full,
       #screen {
         position: fixed;
@@ -1050,11 +1067,8 @@
         border: 0;
         border-radius: 0;
         overflow: hidden;
-        background: Canvas;
+        background: transparent;
         color: inherit;
-        box-shadow:
-          0 -1px 0 var(--sheet-edge),
-          0 1px 0 var(--sheet-edge);
       }
       /* Scoped to [open]: an unscoped display would beat the UA's own
          `dialog:not([open]) { display: none }` and leave both sheets on. */
@@ -1063,15 +1077,11 @@
         display: flex;
       }
       /* The close control's own band, reserved rather than floated over, so
-         the foot of the content is never underneath it. The screen keeps its
-         side padding here too, where it is out of the box `fitScreen` measures
-         against — `clientWidth` would carry it and clip that much off the
-         right. */
-      #full {
-        padding: 0 0 2.75rem;
-      }
+         the foot of the content is never underneath it, and left out of the
+         surface below so the veil shows through it. */
+      #full,
       #screen {
-        padding: 0.5rem 0.75rem 2.75rem;
+        padding: 0 0 2.75rem;
       }
       /* The veil covers what the sheet took over and stops at the controls;
          the UA backdrop would cover those too. */
@@ -1090,13 +1100,18 @@
       body:has(#full[open]) #composer {
         opacity: 0.55;
       }
+      /* The sheet proper: the surface, and the rules that close it off, the
+         same 1px the composer draws against the page. */
       #full .body,
       #screen .body {
         flex: 1;
         min-height: 0;
+        padding: 0.5rem 0.75rem;
+        border-top: 1px solid var(--edge);
+        border-bottom: 1px solid var(--edge);
+        background: Canvas;
       }
       #full .body {
-        padding: 0.5rem 0.75rem;
         overflow: auto;
         outline: none;
         overscroll-behavior: contain;
@@ -1268,6 +1283,9 @@
       #target {
         font-size: 0.85rem;
         color: var(--muted);
+      }
+      #target:empty {
+        display: none;
       }
       /* Two rows to start, growing with what is typed and capped at five —
          past that it scrolls. field-sizing does the growing; `rows` is the
