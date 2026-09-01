@@ -66,17 +66,14 @@ async function post(
 	url: string,
 	fallback: string,
 	body?: unknown,
+	signal?: AbortSignal,
 ): Promise<void> {
-	const response = await fetch(
-		url,
-		body === undefined
-			? { method: "POST" }
-			: {
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify(body),
-				},
-	);
+	const init: RequestInit = { method: "POST", signal };
+	if (body !== undefined) {
+		init.headers = { "content-type": "application/json" };
+		init.body = JSON.stringify(body);
+	}
+	const response = await fetch(url, init);
 	if (!response.ok) {
 		throw new Error(await reason(response, fallback));
 	}
@@ -243,7 +240,12 @@ export async function fetchLive(
  *  columns is destroyed before it is ever read. How wide that ends up being is
  *  the operator's window, not something this code predicts. */
 export const openPane = (paneId: string): Promise<void> =>
-	post(paneUrl(paneId, "open"), "could not open the pane");
+	post(
+		paneUrl(paneId, "open"),
+		"could not open the pane",
+		undefined,
+		AbortSignal.timeout(5000),
+	);
 
 /** `keepalive`, because this also fires from `pagehide`, when ordinary requests
  *  are cancelled along with the page. A close that is lost anyway is repaired

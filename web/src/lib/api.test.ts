@@ -5,6 +5,7 @@ import {
 	fetchTranscript,
 	forgetPane,
 	isTransient,
+	openPane,
 	type Pane,
 	paneSubtitle,
 	pressArrow,
@@ -161,6 +162,42 @@ test("a refused arrow key surfaces the server's own words", async () => {
 	} finally {
 		vi.unstubAllGlobals();
 	}
+});
+
+test("a stalled open times out so the first pane tick can run", async () => {
+	const controller = new AbortController();
+	const timeout = vi
+		.spyOn(AbortSignal, "timeout")
+		.mockReturnValue(controller.signal);
+	const fetchMock = vi.fn(
+		(_input: RequestInfo | URL, init?: RequestInit) =>
+			new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener(
+					"abort",
+					() => reject(init.signal?.reason),
+					{ once: true },
+				);
+			}),
+	);
+	vi.stubGlobal("fetch", fetchMock);
+	let ticked = false;
+	const firstTick = openPane("w1:p1")
+		.catch(() => {})
+		.then(() => {
+			ticked = true;
+		});
+
+	try {
+		expect(timeout).toHaveBeenCalledWith(5000);
+		controller.abort(new DOMException("signal timed out", "TimeoutError"));
+		await firstTick;
+	} finally {
+		timeout.mockRestore();
+		vi.unstubAllGlobals();
+	}
+
+	expect(ticked).toBe(true);
+	expect(fetchMock.mock.calls[0]?.[1]?.signal).toBe(controller.signal);
 });
 
 /** A fetch double with the real signature, so `mock.calls[0]` is a real tuple. */
