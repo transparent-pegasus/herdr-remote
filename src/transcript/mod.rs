@@ -827,18 +827,17 @@ impl Transcript {
         if len == self.len {
             return Ok(());
         }
-        self.len = len;
-        if len < self.offset {
-            // Truncated or rotated: the offset now points past the end, so the
-            // only honest reading is from the start.
-            self.offset = 0;
-            self.next_seq = 0;
-            self.messages.clear();
-        }
+
+        // Parse into local state so an open, seek, or read failure leaves the
+        // last successful snapshot intact and the same bytes eligible to retry.
+        let reset = len < self.offset;
+        let mut offset = if reset { 0 } else { self.offset };
+        let mut next_seq = if reset { 0 } else { self.next_seq };
+        let mut messages = Vec::new();
 
         let mut file =
             std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-        file.seek(SeekFrom::Start(self.offset))?;
+        file.seek(SeekFrom::Start(offset))?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
         loop {
@@ -852,17 +851,25 @@ impl Transcript {
             if !line.ends_with('\n') {
                 break;
             }
-            self.offset += read as u64;
+            offset += read as u64;
             let parsed = match format {
-                Format::Claude => claude::parse_line(&line, self.next_seq),
-                Format::Codex => codex::parse_line(&line, self.next_seq),
-                Format::Grok => grok::parse_line(&line, self.next_seq),
+                Format::Claude => claude::parse_line(&line, next_seq),
+                Format::Codex => codex::parse_line(&line, next_seq),
+                Format::Grok => grok::parse_line(&line, next_seq),
             };
             if let Some(message) = parsed {
-                self.messages.push(message);
-                self.next_seq += 1;
+                messages.push(message);
+                next_seq += 1;
             }
         }
+        if reset {
+            self.messages = messages;
+        } else {
+            self.messages.extend(messages);
+        }
+        self.offset = offset;
+        self.next_seq = next_seq;
+        self.len = len;
         Ok(())
     }
 }
@@ -871,6 +878,7 @@ impl Transcript {
 mod cache_tests {
     use super::*;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
 
     fn scratch_file() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -955,6 +963,35 @@ mod cache_tests {
         transcript.refresh().unwrap();
         assert_eq!(transcript.version(), version);
         assert_eq!(transcript.messages().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_read_retries_the_same_bytes() {
+        let path = scratch_file();
+        append(&path, &user("first"));
+        let mut transcript = Transcript::open(Source::Lines {
+            path: path.clone(),
+            format: Format::Claude,
+        });
+        transcript.refresh().unwrap();
+
+        append(&path, &user("second"));
+        let readable = std::fs::metadata(&path).unwrap().permissions();
+        let mut unreadable = readable.clone();
+        unreadable.set_mode(0o000);
+        std::fs::set_permissions(&path, unreadable).unwrap();
+        assert!(transcript.refresh().is_err());
+        std::fs::set_permissions(&path, readable).unwrap();
+
+        transcript.refresh().unwrap();
+        assert_eq!(
+            transcript
+                .messages()
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
     }
 
     #[test]
