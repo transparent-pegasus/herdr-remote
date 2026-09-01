@@ -228,6 +228,23 @@ fn card(message: &transcript::Message) -> Card {
     }
 }
 
+fn transcript_is_missing(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            || cause
+                .downcast_ref::<rusqlite::Error>()
+                .is_some_and(|error| {
+                    matches!(
+                        error,
+                        rusqlite::Error::SqliteFailure(code, _)
+                            if code.code == rusqlite::ErrorCode::CannotOpen
+                    )
+                })
+    })
+}
+
 /// Parsing a cold transcript — forty-four megabytes at the extreme — reading
 /// SQLite, and rendering markdown are all synchronous. Only a source that went
 /// missing becomes `None`; other failures keep the cache and reach the client
@@ -271,10 +288,7 @@ fn take_window(
         .lock()
         .map_err(|_| anyhow::anyhow!("transcript cache entry is poisoned"))?;
     if let Err(error) = transcript.refresh() {
-        let missing = error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        if missing {
+        if transcript_is_missing(&error) {
             drop(transcript);
             let mut map = cache
                 .lock()
@@ -791,6 +805,63 @@ mod tests {
         );
 
         assert!(matches!(result, Ok(None)));
+        assert!(!cache.lock().unwrap().contains_key("pane"));
+    }
+
+    #[test]
+    fn a_deleted_cursor_store_drops_its_cache_entry() {
+        let home = scratch_home("deleted-cursor-store");
+        let path = home.join("store.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "create table blobs (id text primary key, data blob);\
+                 create table meta (key text primary key, value text);",
+            )
+            .unwrap();
+        let root = "0".repeat(64);
+        connection
+            .execute(
+                "insert into blobs values (?1, ?2)",
+                rusqlite::params![root, Vec::<u8>::new()],
+            )
+            .unwrap();
+        let meta = serde_json::json!({ "latestRootBlobId": root }).to_string();
+        let encoded = meta
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        connection
+            .execute("insert into meta values ('0', ?1)", [encoded])
+            .unwrap();
+        drop(connection);
+
+        let cache = Cache::default();
+        let identity = transcript_identity();
+        insert_cached(
+            &cache,
+            "pane",
+            &identity,
+            transcript::Source::CursorDb { path: path.clone() },
+        );
+        assert!(
+            take_window(
+                cache.clone(),
+                "pane".into(),
+                identity.clone(),
+                home.clone(),
+                None,
+                30,
+            )
+            .unwrap()
+            .is_some()
+        );
+
+        std::fs::remove_file(path).unwrap();
+        let result = take_window(cache.clone(), "pane".into(), identity, home, None, 30);
+
+        assert!(matches!(result, Ok(None)), "{result:?}");
         assert!(!cache.lock().unwrap().contains_key("pane"));
     }
 
