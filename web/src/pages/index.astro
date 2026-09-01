@@ -68,7 +68,7 @@
       </button>
     </div>
     <dialog id="screen">
-      <div class="body"><pre></pre></div>
+      <div class="body" tabindex="-1"><pre></pre></div>
       <button id="screen-close" type="button" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -357,6 +357,7 @@
         // show(), not showModal(): a picker on the screen is answered with the
         // controls below it, which a modal would make inert.
         screenEl.show();
+        screenViewEl.focus();
         fitScreen();
       });
 
@@ -1075,10 +1076,13 @@
         max-height: none;
         flex-direction: column;
         margin: 0;
-        border: 0;
+        padding: 0;
+        border-width: 1px 0;
+        border-style: solid;
+        border-color: var(--edge);
         border-radius: 0;
         overflow: hidden;
-        background: transparent;
+        background: Canvas;
         color: inherit;
       }
       /* Scoped to [open]: an unscoped display would beat the UA's own
@@ -1086,13 +1090,6 @@
       #full[open],
       #screen[open] {
         display: flex;
-      }
-      /* The close control's own band, reserved rather than floated over, so
-         the foot of the content is never underneath it, and left out of the
-         surface below so the veil shows through it. */
-      #full,
-      #screen {
-        padding: 0 0 2.75rem;
       }
       /* The veil covers what the sheet took over and stops at the controls;
          the UA backdrop would cover those too. */
@@ -1111,20 +1108,21 @@
       body:has(#full[open]) #composer {
         opacity: 0.55;
       }
-      /* The sheet proper: the surface, and the rules that close it off, the
-         same 1px the composer draws against the page. */
+      /* The close control floats over the foot of the sheet; the padding is
+         the room it needs, inside the scroller so the end of a long message
+         clears it too, and inside the box `fitScreen` measures so a screen is
+         never scaled under it. */
       #full .body,
       #screen .body {
         flex: 1;
         min-height: 0;
-        padding: 0.5rem 0.75rem;
-        border-top: 1px solid var(--edge);
-        border-bottom: 1px solid var(--edge);
-        background: Canvas;
+        padding: 0.5rem 0.75rem 3rem;
+        /* Both sheets park focus on their text rather than on the close
+           control, which is where the dialog focusing steps would put it. */
+        outline: none;
       }
       #full .body {
         overflow: auto;
-        outline: none;
         overscroll-behavior: contain;
       }
       #full .body.wrap {
