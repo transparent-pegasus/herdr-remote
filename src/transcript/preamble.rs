@@ -25,6 +25,39 @@ pub fn strip(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// A local command's output is a turn of its own whose whole body is the tag,
+/// so only a text that is nothing else is one. Terminal colour comes with it,
+/// and nothing on the phone renders it.
+pub fn command_output(text: &str) -> Option<String> {
+    let body = text
+        .trim()
+        .strip_prefix("<local-command-stdout>")?
+        .strip_suffix("</local-command-stdout>")?;
+    Some(without_ansi(body).trim().to_string())
+}
+
+/// CSI sequences only, which is all a command's own output carries.
+fn without_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            out.push(character);
+            continue;
+        }
+        if characters.peek() == Some(&'[') {
+            characters.next();
+            // A CSI ends at its final byte, the first one in `@`..=`~`.
+            for character in characters.by_ref() {
+                if ('@'..='~').contains(&character) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 fn command(text: &str) -> String {
     let name = between(text, "<command-name>", "</command-name>").unwrap_or_default();
     let args = between(text, "<command-args>", "</command-args>").unwrap_or_default();
@@ -102,6 +135,19 @@ mod tests {
     fn a_message_that_quotes_the_tags_keeps_its_prose() {
         let text = "`/clear` prints\n<command-name>/clear</command-name>\nwhy?";
         assert!(strip(text).starts_with("`/clear` prints"));
+    }
+
+    #[test]
+    fn a_local_command_writes_its_output_as_its_own_turn() {
+        let text =
+            "<local-command-stdout>Set model to \u{1b}[1mOpus 5\u{1b}[22m</local-command-stdout>";
+        assert_eq!(command_output(text).unwrap(), "Set model to Opus 5");
+    }
+
+    #[test]
+    fn prose_that_merely_mentions_the_tag_is_not_output() {
+        assert!(command_output("see <local-command-stdout> in the file").is_none());
+        assert!(command_output("plain words").is_none());
     }
 
     #[test]

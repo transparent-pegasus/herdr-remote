@@ -113,7 +113,12 @@ fn parse_blob(bytes: &[u8], seq: u64) -> Option<Message> {
     } else {
         text
     };
-    (!text.trim().is_empty()).then_some(Message { seq, role, text })
+    (!text.trim().is_empty()).then_some(Message {
+        seq,
+        role,
+        text,
+        output: None,
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {

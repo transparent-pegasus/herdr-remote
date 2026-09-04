@@ -26,6 +26,17 @@ pub struct Message {
     pub seq: u64,
     pub role: Role,
     pub text: String,
+    /// A local command's own output, when this message is the command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+/// What one transcript line is: a message of its own, or the tail of the one
+/// before it. A slash command's output is written as its own line and belongs
+/// to the command it answers.
+pub enum Parsed {
+    Message(Message),
+    Output(String),
 }
 
 #[cfg(test)]
@@ -50,6 +61,7 @@ mod tests {
             seq: 3,
             role: Role::Assistant,
             text: "done".into(),
+            output: None,
         };
         let json = serde_json::to_string(&message).unwrap();
         assert_eq!(json, r#"{"seq":3,"role":"assistant","text":"done"}"#);
@@ -856,6 +868,9 @@ impl Transcript {
         let mut offset = if reset { 0 } else { self.offset };
         let mut next_seq = if reset { 0 } else { self.next_seq };
         let mut messages = Vec::new();
+        // Output whose command is in a batch already served, and so is not in
+        // `messages`: carried out of the loop, where the snapshot is touched.
+        let mut carried: Option<String> = None;
 
         let mut file =
             std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -876,18 +891,30 @@ impl Transcript {
             offset += read as u64;
             let parsed = match format {
                 Format::Claude => claude::parse_line(&line, next_seq),
-                Format::Codex => codex::parse_line(&line, next_seq),
-                Format::Grok => grok::parse_line(&line, next_seq),
+                Format::Codex => codex::parse_line(&line, next_seq).map(Parsed::Message),
+                Format::Grok => grok::parse_line(&line, next_seq).map(Parsed::Message),
             };
-            if let Some(message) = parsed {
-                messages.push(message);
-                next_seq += 1;
+            match parsed {
+                Some(Parsed::Message(message)) => {
+                    messages.push(message);
+                    next_seq += 1;
+                }
+                Some(Parsed::Output(output)) => match messages.last_mut() {
+                    Some(last) => last.output = Some(output),
+                    None => carried = Some(output),
+                },
+                None => {}
             }
         }
         if reset {
             self.messages = messages;
         } else {
             self.messages.extend(messages);
+            if let Some(output) = carried
+                && let Some(last) = self.messages.last_mut()
+            {
+                last.output = Some(output);
+            }
         }
         self.offset = offset;
         self.next_seq = next_seq;
@@ -948,6 +975,53 @@ mod cache_tests {
     /// The point of the offset: a line already parsed is never read again. If
     /// the refresh silently reparsed from the start, the corrupted first line
     /// would take the message it produced with it.
+    /// One command, one card: the output line that follows it is the answer
+    /// it carries, not a message of its own.
+    #[test]
+    fn a_commands_output_lands_on_the_command() {
+        let path = scratch_file();
+        append(&path, &user("<command-name>/model</command-name>"));
+        append(
+            &path,
+            &user("<local-command-stdout>Set model to Opus 5</local-command-stdout>"),
+        );
+        let mut transcript = Transcript::open(Source::Lines {
+            path: path.clone(),
+            format: Format::Claude,
+        });
+        transcript.refresh().unwrap();
+
+        assert_eq!(transcript.messages().len(), 1);
+        assert_eq!(transcript.messages()[0].text, "/model");
+        assert_eq!(
+            transcript.messages()[0].output.as_deref(),
+            Some("Set model to Opus 5")
+        );
+    }
+
+    /// The command is served the moment it is written, and its output arrives
+    /// in a later refresh: it still has to find the message it belongs to.
+    #[test]
+    fn an_output_written_after_its_command_was_served_still_finds_it() {
+        let path = scratch_file();
+        append(&path, &user("<command-name>/clear</command-name>"));
+        let mut transcript = Transcript::open(Source::Lines {
+            path: path.clone(),
+            format: Format::Claude,
+        });
+        transcript.refresh().unwrap();
+        assert_eq!(transcript.messages()[0].output, None);
+
+        append(
+            &path,
+            &user("<local-command-stdout>cleared</local-command-stdout>"),
+        );
+        transcript.refresh().unwrap();
+
+        assert_eq!(transcript.messages().len(), 1);
+        assert_eq!(transcript.messages()[0].output.as_deref(), Some("cleared"));
+    }
+
     #[test]
     fn an_already_parsed_line_survives_being_corrupted_afterwards() {
         let path = scratch_file();

@@ -63,24 +63,6 @@ pub fn to_html(md: &str) -> String {
     out
 }
 
-/// A user's own words, as HTML that means exactly what they typed. Both
-/// speakers reach the phone through the same `html` field, so the user's half
-/// is escaped here rather than left as a second, differently-handled shape.
-pub fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(character),
-        }
-    }
-    out
-}
-
 /// The card's three-line preview is plain text in one node, which is what lets
 /// CSS clamp it cleanly; markup would give the clamp block children to trip on.
 /// Block ends and soft breaks become single spaces, so a heading does not run
@@ -170,14 +152,6 @@ mod tests {
     fn preview_is_plain_text_within_its_cap() {
         let text = preview("## 原因1\n\n`read()` は **recent** を渡す。", 300);
         assert_eq!(text, "原因1 read() は recent を渡す。");
-    }
-
-    #[test]
-    fn a_users_own_words_become_html_that_means_what_they_typed() {
-        assert_eq!(
-            escape("<script>alert('x' & \"y\")</script>"),
-            "&lt;script&gt;alert(&#39;x&#39; &amp; &quot;y&quot;)&lt;/script&gt;"
-        );
     }
 
     /// The card previews what the modal shows. Prose about `<Foo>` keeps it in

@@ -78,6 +78,9 @@ struct Card {
     role: transcript::Role,
     preview: String,
     html: String,
+    /// A local command's output, shown under the command it answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -236,12 +239,12 @@ fn card(message: &transcript::Message) -> Card {
         seq: message.seq,
         role: message.role,
         preview: markdown::preview(&message.text, 300),
-        html: match message.role {
-            transcript::Role::Assistant => markdown::to_html(&message.text),
-            // The user's own words are not markup, and reach the phone through
-            // the same field, so they arrive as HTML that means what they typed.
-            transcript::Role::User => markdown::escape(&message.text),
-        },
+        // Both speakers write markdown, and the renderer escapes raw HTML and
+        // gates link and image schemes, so neither half can script the page.
+        html: markdown::to_html(&message.text),
+        // A command's output is not markdown and not anyone's words: it goes
+        // as text, and the phone gives it a node of its own.
+        output: message.output.clone(),
     }
 }
 
@@ -771,6 +774,7 @@ mod tests {
                 seq: *seq,
                 role: herdr_remote::transcript::Role::User,
                 text: format!("m{seq}"),
+                output: None,
             })
             .collect()
     }
@@ -1393,19 +1397,25 @@ mod tests {
     }
 
     #[test]
-    fn a_user_card_carries_escaped_text_and_an_agent_card_carries_html() {
+    fn both_speakers_cards_carry_rendered_markdown() {
         let user = card(&herdr_remote::transcript::Message {
             seq: 0,
             role: herdr_remote::transcript::Role::User,
-            text: "<b>hi</b>".into(),
+            text: "1. <b>hi</b>".into(),
+            output: Some("done".into()),
         });
-        assert_eq!(user.html, "&lt;b&gt;hi&lt;/b&gt;");
+        // The list the user typed renders; the tag they typed does not.
+        assert!(user.html.contains("<ol>"));
+        assert!(user.html.contains("&lt;b&gt;hi&lt;/b&gt;"));
+        assert_eq!(user.output.as_deref(), Some("done"));
         let agent = card(&herdr_remote::transcript::Message {
             seq: 1,
             role: herdr_remote::transcript::Role::Assistant,
             text: "**hi**".into(),
+            output: None,
         });
         assert!(agent.html.contains("<strong>hi</strong>"));
+        assert_eq!(agent.output, None);
     }
 
     #[test]

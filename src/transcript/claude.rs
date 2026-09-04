@@ -3,12 +3,12 @@
 
 use serde_json::Value;
 
-use super::{Message, Role, preamble};
+use super::{Message, Parsed, Role, preamble};
 
 /// `None` for every line that is not a speaker: tool calls, tool results,
 /// thinking, the attachments that are not a message, and the session's
 /// bookkeeping rows.
-pub fn parse_line(line: &str, seq: u64) -> Option<Message> {
+pub fn parse_line(line: &str, seq: u64) -> Option<Parsed> {
     let value: Value = serde_json::from_str(line).ok()?;
     // `isMeta` marks what the harness injected under the user's name: the
     // local-command caveat, a slash command's expanded body, a nudge to
@@ -24,7 +24,7 @@ pub fn parse_line(line: &str, seq: u64) -> Option<Message> {
         // the agent picked them up. Skipping it drops the message from the
         // history and leaves the phone's own copy of what it sent waiting for
         // a turn the file will never hold.
-        "attachment" => return queued(value.get("attachment")?, seq),
+        "attachment" => return queued(value.get("attachment")?, seq).map(Parsed::Message),
         _ => return None,
     };
     let content = value.get("message")?.get("content")?;
@@ -39,6 +39,13 @@ pub fn parse_line(line: &str, seq: u64) -> Option<Message> {
             .join("\n"),
         _ => return None,
     };
+    // A local command's output is not the user speaking: it is the answer to
+    // the command above it, and belongs to the card that shows the command.
+    if role == Role::User
+        && let Some(output) = preamble::command_output(&joined)
+    {
+        return (!output.is_empty()).then_some(Parsed::Output(output));
+    }
     // Only a user turn carries injected blocks. An assistant that quotes
     // `<system-reminder>` in its prose keeps every character.
     let text = if role == Role::User {
@@ -47,7 +54,12 @@ pub fn parse_line(line: &str, seq: u64) -> Option<Message> {
         joined
     };
 
-    (!text.trim().is_empty()).then_some(Message { seq, role, text })
+    (!text.trim().is_empty()).then_some(Parsed::Message(Message {
+        seq,
+        role,
+        text,
+        output: None,
+    }))
 }
 
 fn queued(attachment: &Value, seq: u64) -> Option<Message> {
@@ -59,6 +71,7 @@ fn queued(attachment: &Value, seq: u64) -> Option<Message> {
         seq,
         role: Role::User,
         text,
+        output: None,
     })
 }
 
@@ -66,10 +79,18 @@ fn queued(attachment: &Value, seq: u64) -> Option<Message> {
 mod tests {
     use super::*;
 
+    /// Every test but the output ones is about a speaker's own message.
+    fn message(line: &str, seq: u64) -> Option<Message> {
+        match parse_line(line, seq) {
+            Some(Parsed::Message(message)) => Some(message),
+            _ => None,
+        }
+    }
+
     #[test]
     fn a_string_user_turn_is_a_message() {
         let line = r#"{"type":"user","message":{"content":"fix the wrap"}}"#;
-        let message = parse_line(line, 7).unwrap();
+        let message = message(line, 7).unwrap();
         assert_eq!(message.role, Role::User);
         assert_eq!(message.text, "fix the wrap");
         assert_eq!(message.seq, 7);
@@ -82,7 +103,7 @@ mod tests {
             {"type":"text","text":"first"},
             {"type":"tool_use","name":"Bash","input":{}},
             {"type":"text","text":"second"}]}}"#;
-        let message = parse_line(line, 1).unwrap();
+        let message = message(line, 1).unwrap();
         assert_eq!(message.role, Role::Assistant);
         assert_eq!(message.text, "first\nsecond");
     }
@@ -101,7 +122,7 @@ mod tests {
     fn a_queued_command_is_the_user_speaking() {
         let line = r#"{"type":"attachment","attachment":{
             "type":"queued_command","prompt":"and centre the sheet"}}"#;
-        let message = parse_line(line, 4).unwrap();
+        let message = message(line, 4).unwrap();
         assert_eq!(message.role, Role::User);
         assert_eq!(message.text, "and centre the sheet");
         assert_eq!(message.seq, 4);
@@ -128,7 +149,7 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"content":[
             {"type":"text","text":"write <system-reminder>x</system-reminder> literally"}]}}"#;
         assert_eq!(
-            parse_line(line, 1).unwrap().text,
+            message(line, 1).unwrap().text,
             "write <system-reminder>x</system-reminder> literally"
         );
     }
@@ -138,15 +159,34 @@ mod tests {
     fn a_slash_command_is_the_user_speaking() {
         let line = r#"{"type":"user","message":{"content":
             "<command-name>/clear</command-name>\n  <command-args></command-args>"}}"#;
-        let message = parse_line(line, 2).unwrap();
+        let message = message(line, 2).unwrap();
         assert_eq!(message.role, Role::User);
         assert_eq!(message.text, "/clear");
+    }
+
+    /// The command's own answer is written as a turn, but it is the harness
+    /// speaking, and it belongs to the card that shows the command.
+    #[test]
+    fn a_commands_output_is_the_tail_of_the_command_not_a_turn_of_its_own() {
+        let line = r#"{"type":"user","message":{"content":
+            "<local-command-stdout>Set model to Opus 5</local-command-stdout>"}}"#;
+        let Some(Parsed::Output(output)) = parse_line(line, 3) else {
+            panic!("not output")
+        };
+        assert_eq!(output, "Set model to Opus 5");
+    }
+
+    #[test]
+    fn an_empty_output_is_nothing_at_all() {
+        let line = r#"{"type":"user","message":{"content":
+            "<local-command-stdout></local-command-stdout>"}}"#;
+        assert!(parse_line(line, 1).is_none());
     }
 
     #[test]
     fn a_user_turn_loses_its_reminders() {
         let line = r#"{"type":"user","message":{"content":[
             {"type":"text","text":"do it<system-reminder>noise</system-reminder>"}]}}"#;
-        assert_eq!(parse_line(line, 1).unwrap().text, "do it");
+        assert_eq!(message(line, 1).unwrap().text, "do it");
     }
 }

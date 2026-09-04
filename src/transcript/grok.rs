@@ -35,7 +35,12 @@ pub fn parse_line(line: &str, seq: u64) -> Option<Message> {
     // first three "user" rows of a session were an environment block and two
     // reminder dumps with no human text in them. Stripping empties those, and
     // an empty message is not a message.
-    (!text.trim().is_empty()).then_some(Message { seq, role, text })
+    (!text.trim().is_empty()).then_some(Message {
+        seq,
+        role,
+        text,
+        output: None,
+    })
 }
 
 #[cfg(test)]
