@@ -231,6 +231,20 @@
         '<polyline points="15 10 20 15 15 20" />' +
         '<path d="M4 4v7a4 4 0 0 0 4 4h12" /></svg>';
 
+      /** A card's box, with the clamped preview inside rather than as the box
+       *  itself: the clamp wants `display: -webkit-box`, and a flex item —
+       *  which is what a direct child of the card is — blockifies that away. */
+      function bubble(text: string) {
+        const box = document.createElement("div");
+        box.className = "bubble";
+        const preview = document.createElement("p");
+        preview.className = "preview";
+        // textContent: a preview is the speaker's words, not our markup.
+        preview.textContent = text;
+        box.append(preview);
+        return box;
+      }
+
       /** A command's own output, under the command it answered. The arrow sits
        *  outside the bubble; in the list the text is clamped like any preview,
        *  in the sheet it is the whole of it. */
@@ -239,10 +253,13 @@
         row.className = "out";
         // Our own markup, a constant; the output itself goes in as text.
         row.innerHTML = FORK;
-        const body = document.createElement("p");
-        if (clamp) body.className = "preview bubble";
-        body.textContent = text;
-        row.append(body);
+        if (clamp) {
+          row.append(bubble(text));
+        } else {
+          const body = document.createElement("p");
+          body.textContent = text;
+          row.append(body);
+        }
         return row;
       }
 
@@ -253,11 +270,7 @@
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.seq = String(card.seq);
-        const preview = document.createElement("p");
-        preview.className = "preview bubble";
-        // textContent: a preview is the speaker's words, not our markup.
-        preview.textContent = card.preview;
-        button.append(preview);
+        button.append(bubble(card.preview));
         if (card.output) button.append(outputRow(card.output, true));
         item.append(button);
         return item;
@@ -1212,6 +1225,7 @@
         align-items: center;
         gap: 0.5rem;
       }
+      .out > .bubble,
       .out > p {
         flex: 1;
         min-width: 0;
