@@ -38,7 +38,7 @@ POST /api/panes/{pane_id}/up         # Up, to move the selection in it; same rul
 POST /api/panes/{pane_id}/down       # Down, likewise
 GET  /api/panes/{pane_id}/output     # plain text; ?lines=1..20000 (default 300),
                                      # ?source=scrollback|screen; x-truncated: true when more remains
-GET  /api/panes/{pane_id}/transcript # {"messages":[{"seq","role","preview","html"}],"has_more"};
+GET  /api/panes/{pane_id}/transcript # {"messages":[{"seq","role","preview","html","output"?}],"has_more"};
                                      # ?limit=1..200 (default 30), ?before=<seq> reaches further back;
                                      # ETag + 304 on an unchanged window;
                                      # 404 "no transcript for this pane" means use output instead
