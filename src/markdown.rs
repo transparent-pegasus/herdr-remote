@@ -63,6 +63,17 @@ pub fn to_html(md: &str) -> String {
     out
 }
 
+/// A preview of text that is not the parser's to read: the collapse and the
+/// cap `preview` ends with, without the parse that would eat a list's `1.`.
+pub fn plain(text: &str, cap: usize) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(cap)
+        .collect()
+}
+
 /// The card's three-line preview is plain text in one node, which is what lets
 /// CSS clamp it cleanly; markup would give the clamp block children to trip on.
 /// Block ends and soft breaks become single spaces, so a heading does not run
@@ -159,6 +170,13 @@ mod tests {
     #[test]
     fn preview_keeps_literal_html_shaped_prose() {
         assert_eq!(preview("型は <Foo> と書く。", 300), "型は <Foo> と書く。");
+    }
+
+    #[test]
+    fn a_plain_preview_keeps_the_markers_the_parser_would_eat() {
+        assert_eq!(plain("1. one\n2. two", 300), "1. one 2. two");
+        assert_eq!(plain("  # not a heading  ", 300), "# not a heading");
+        assert_eq!(plain(&"あ".repeat(500), 10).chars().count(), 10);
     }
 
     #[test]

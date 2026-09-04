@@ -238,7 +238,13 @@ fn card(message: &transcript::Message) -> Card {
     Card {
         seq: message.seq,
         role: message.role,
-        preview: markdown::preview(&message.text, 300),
+        preview: match message.role {
+            transcript::Role::Assistant => markdown::preview(&message.text, 300),
+            // What the person typed, markers and all: the parser reads `1.` as
+            // a list and `#` as a heading and drops both, and the card would
+            // lose characters its own writer put there.
+            transcript::Role::User => markdown::plain(&message.text, 300),
+        },
         // Both speakers write markdown, and the renderer escapes raw HTML and
         // gates link and image schemes, so neither half can script the page.
         html: markdown::to_html(&message.text),
@@ -1404,8 +1410,10 @@ mod tests {
             text: "1. <b>hi</b>".into(),
             output: Some("done".into()),
         });
-        // The list the user typed renders; the tag they typed does not.
+        // The list the user typed renders, and the card still previews the
+        // number they wrote; the tag they typed renders as text.
         assert!(user.html.contains("<ol>"));
+        assert_eq!(user.preview, "1. <b>hi</b>");
         assert!(user.html.contains("&lt;b&gt;hi&lt;/b&gt;"));
         assert_eq!(user.output.as_deref(), Some("done"));
         let agent = card(&herdr_remote::transcript::Message {

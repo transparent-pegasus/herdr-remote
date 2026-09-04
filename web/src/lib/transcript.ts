@@ -93,18 +93,17 @@ export function sentCard(sent: Sent, index: number): Card {
 	};
 }
 
-/** Letters and digits alone. The card carries the markdown parser's rendering
- *  of what was typed — `* one\n* two` arrives as `one two` — so anything the
- *  parser can drop has to be dropped from both sides before they are compared. */
+/** Letters and digits alone. A user's preview is what they typed, collapsed,
+ *  and so is ours — but only one of the two went through the server, so the
+ *  comparison drops everything whitespace and punctuation could differ on. */
 const key = (text: string): string =>
 	text.replace(/[^\p{L}\p{N}]/gu, "").toLowerCase();
 
 /** How many queued messages one arriving turn accounts for. An agent may hand
  *  a queue over one turn at a time or fold the whole of it into a single turn,
  *  and that turn's own text is the only thing that says which. Zero means the
- *  text settled nothing — a link or an image leaves the parser's version too
- *  different, and a message past the preview's 300-character cap cannot match
- *  at all — and the caller falls back to one. */
+ *  text settled nothing — a message past the preview's 300-character cap
+ *  cannot match at all — and the caller falls back to one. */
 function covered(preview: string, queued: Sent[]): number {
 	let left = key(preview);
 	let taken = 0;
