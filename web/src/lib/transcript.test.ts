@@ -77,15 +77,21 @@ test("prepend puts older messages in front, without duplicating the overlap", ()
 	expect(prepend([], existing)).toBe(existing);
 });
 
-test("the modal wraps a user's text and renders an agent's markdown", () => {
+test("the modal wraps only what we escaped here, not what the server rendered", () => {
+	// Both speakers' words arrive as rendered markdown; a message still waiting
+	// for the agent's own file is the one text we escaped ourselves.
 	expect(modalContent(card(1, "user"))).toEqual({
-		wrap: true,
-		html: "<p>1</p>",
-	});
-	expect(modalContent(card(1, "assistant"))).toEqual({
 		wrap: false,
 		html: "<p>1</p>",
 	});
+	expect(modalContent(sentCard({ after: 1, text: "a\nb" }, 0)).wrap).toBe(true);
+});
+
+test("a card whose command output changed is a card that changed", () => {
+	const one = card(1, "user");
+	const two = { ...one, output: "Set model to Opus 5" };
+	expect(append([one], [two])).toEqual([two]);
+	expect(append([two], [two])).toEqual([two]);
 });
 
 test("the tail is followed only from the tail", () => {

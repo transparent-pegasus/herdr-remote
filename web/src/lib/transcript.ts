@@ -3,6 +3,11 @@ export type Card = {
 	role: "user" | "assistant";
 	preview: string;
 	html: string;
+	/** A local command's own output, shown under the command it answers. */
+	output?: string;
+	/** Text this page escaped rather than markdown the server rendered, which
+	 *  is only ever a message still waiting for the agent's own file. */
+	wrap?: true;
 };
 
 export type Page = { messages: Card[]; has_more: boolean };
@@ -17,7 +22,10 @@ export function agentRawState(screen?: string):
 }
 
 const same = (a: Card, b: Card): boolean =>
-	a.role === b.role && a.preview === b.preview && a.html === b.html;
+	a.role === b.role &&
+	a.preview === b.preview &&
+	a.html === b.html &&
+	a.output === b.output;
 
 /** Merge by `seq`, newest copy winning, oldest first. Polls overlap by design —
  *  the server answers with a window, not a delta — so the common case is a page
@@ -81,6 +89,7 @@ export function sentCard(sent: Sent, index: number): Card {
 		role: "user",
 		preview: sent.text.replace(/\s+/g, " ").trim().slice(0, 300),
 		html: escapeText(sent.text),
+		wrap: true,
 	};
 }
 
@@ -140,11 +149,11 @@ export function settle(sent: Sent[], cards: Card[]): Sent[] {
 	return same ? sent : rest;
 }
 
-/** The agent's half is markdown the server rendered; the user's half is text
- *  the server escaped. Both arrive as HTML, and only the user's needs the
- *  whitespace of what they actually typed. */
+/** Both speakers' halves are markdown the server rendered. Only a message this
+ *  page is still holding for the agent is text it escaped itself, and only
+ *  that needs the whitespace of what was actually typed. */
 export const modalContent = (card: Card): { wrap: boolean; html: string } => ({
-	wrap: card.role === "user",
+	wrap: card.wrap === true,
 	html: card.html,
 });
 

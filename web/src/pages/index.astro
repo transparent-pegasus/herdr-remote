@@ -225,6 +225,27 @@
        *  was sent from here and the agent has not written down yet. */
       let shown: Card[] = [];
 
+      /** Lucide's corner-down-right, the mirror of the composer's enter arrow. */
+      const FORK =
+        '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+        '<polyline points="15 10 20 15 15 20" />' +
+        '<path d="M4 4v7a4 4 0 0 0 4 4h12" /></svg>';
+
+      /** A command's own output, under the command it answered. The arrow sits
+       *  outside the bubble; in the list the text is clamped like any preview,
+       *  in the sheet it is the whole of it. */
+      function outputRow(text: string, clamp: boolean) {
+        const row = document.createElement("div");
+        row.className = "out";
+        // Our own markup, a constant; the output itself goes in as text.
+        row.innerHTML = FORK;
+        const body = document.createElement("p");
+        if (clamp) body.className = "preview bubble";
+        body.textContent = text;
+        row.append(body);
+        return row;
+      }
+
       function cardEl(card: Card, queued: boolean) {
         const item = document.createElement("li");
         item.dataset.role = card.role;
@@ -233,10 +254,11 @@
         button.type = "button";
         button.dataset.seq = String(card.seq);
         const preview = document.createElement("p");
-        preview.className = "preview";
+        preview.className = "preview bubble";
         // textContent: a preview is the speaker's words, not our markup.
         preview.textContent = card.preview;
         button.append(preview);
+        if (card.output) button.append(outputRow(card.output, true));
         item.append(button);
         return item;
       }
@@ -294,12 +316,14 @@
         const { wrap, html } = modalContent(card);
         fullBodyEl.classList.toggle("wrap", wrap);
         fullBodyEl.innerHTML = html;
+        if (card.output) fullBodyEl.append(outputRow(card.output, false));
         fullBodyEl.scrollTop = 0;
         sizeSheets();
-        // showModal(): reading a message is a detour from driving the pane, so
-        // the controls below go inert the way they are outside a pane. Escape
-        // and the focus trap come with it.
-        fullEl.showModal();
+        // show(), not showModal(): the pane keeps being driven while a message
+        // is open. Both sheets stand in the same place, so each closes the
+        // other.
+        if (screenEl.open) screenEl.close();
+        fullEl.show();
         fullBodyEl.focus();
       }
 
@@ -308,8 +332,9 @@
        *  leaves the words where they are and lets the reader select them.
        *  Measured at click time, because the clamp bites or not by width. */
       function clipped(button: HTMLButtonElement) {
-        const preview = button.querySelector<HTMLParagraphElement>(".preview");
-        return !!preview && preview.scrollHeight > preview.clientHeight + 1;
+        return [
+          ...button.querySelectorAll<HTMLParagraphElement>(".preview"),
+        ].some((preview) => preview.scrollHeight > preview.clientHeight + 1);
       }
 
       /** The cursor says which cards have more to show. Set after every paint
@@ -411,6 +436,7 @@
         sizeSheets();
         // show(), not showModal(): a picker on the screen is answered with the
         // controls below it, which a modal would make inert.
+        if (fullEl.open) fullEl.close();
         screenEl.show();
         screenViewEl.focus();
         fitScreen();
@@ -418,9 +444,11 @@
 
       screenCloseEl.addEventListener("click", () => screenEl.close());
 
-      // A non-modal dialog gets no Escape handling of its own.
+      // Neither sheet is modal, so neither gets Escape handling of its own.
       addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && screenEl.open) screenEl.close();
+        if (event.key !== "Escape") return;
+        if (fullEl.open) fullEl.close();
+        if (screenEl.open) screenEl.close();
       });
 
       // A rotation or an on-screen keyboard moves the composer and changes what
@@ -1128,15 +1156,17 @@
       #transcript li:first-of-type {
         margin-top: auto;
       }
-      #transcript li {
-        border-radius: 10px;
-      }
+      /* One card can hold two bubbles — a slash command and the output it
+         answered with — so the paint lives on the bubbles and the item is
+         only the lane. */
       #transcript li > button {
-        display: block;
+        display: flex;
+        flex-direction: column;
+        /* The gap the list already leaves between cards. */
+        gap: 0.5rem;
         width: 100%;
         border: 0;
-        border-radius: inherit;
-        padding: 0.5rem 0.7rem;
+        padding: 0;
         color: inherit;
         background: transparent;
         font: inherit;
@@ -1152,8 +1182,15 @@
       #transcript li > button[data-clipped] {
         cursor: pointer;
       }
+      #transcript .bubble {
+        margin: 0;
+        border-radius: 10px;
+        padding: 0.5rem 0.7rem;
+      }
       #transcript li[data-role="user"] {
         margin-left: 15%;
+      }
+      #transcript li[data-role="user"] .bubble {
         background: var(--card-user);
       }
       /* Sent from here and not yet in the agent's own file. It clears the
@@ -1164,9 +1201,31 @@
       }
       /* Nothing fills the agent's lane: the same 1px the pane rows use is all
          that separates it from the page. */
-      #transcript li[data-role="assistant"] {
+      #transcript li[data-role="assistant"] .bubble {
         border: 1px solid var(--edge);
-        background: transparent;
+      }
+      /* The arrow rides outside the bubble with a gap of its own, and the
+         bubble gives up that much width so both right edges still line up.
+         Centred against it, because a command's answer is a line or two. */
+      .out {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .out > p {
+        flex: 1;
+        min-width: 0;
+      }
+      .out svg {
+        flex: none;
+        width: 16px;
+        height: 16px;
+        color: var(--muted);
+      }
+      /* In the sheet the output is the whole of it, and it is not markdown. */
+      #full .body .out > p {
+        margin: 0;
+        white-space: pre-wrap;
       }
       /* Plain text in one node, which is what lets the clamp cut at three lines and
          append its ellipsis; markup would give it block children to trip on. */
@@ -1180,11 +1239,11 @@
         overflow: hidden;
       }
       /* Both sheets go edge to edge and over the header, with air above and
-         below, and both stop where the composer begins. What differs is who
-         may act while one is open: a message is read with showModal(), which
-         inerts the controls beneath it, and the screen with show(), because a
-         picker on it is answered with those very controls. The only edges
-         either draws are the two the composer already draws. */
+         below, and both stop where the composer begins. Both are opened with
+         show() rather than showModal(): the pane stays drivable underneath,
+         which is what a picker on the screen needs and what reading a message
+         has no reason to take away. The only edges either draws are the two
+         the composer already draws. */
       #full,
       #screen {
         position: fixed;
@@ -1214,22 +1273,15 @@
       #screen[open] {
         display: flex;
       }
-      /* The veil covers what the sheet took over and stops at the controls;
-         the UA backdrop would cover those too. */
-      #full::backdrop {
-        background: transparent;
-      }
+      /* The veil covers what the sheet took over and stops at the controls.
+         A non-modal dialog paints no backdrop of its own, so this is all of
+         it. */
       body:has(dialog[open])::after {
         position: fixed;
         inset: 0 0 var(--composer-h, 9rem);
         z-index: 9;
         background: rgb(0 0 0 / 0.55);
         content: "";
-      }
-      /* showModal() does the inerting; this is the matching dim, the one the
-         panel already wears with no pane picked. */
-      body:has(#full[open]) #composer {
-        opacity: 0.55;
       }
       /* The close control floats over the foot of the sheet; the padding is
          the room it needs, inside the scroller so the end of a long message
