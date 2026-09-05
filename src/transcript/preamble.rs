@@ -8,9 +8,12 @@ pub fn strip(text: &str) -> String {
     if let Some(inner) = between(text, "<user_query>", "</user_query>") {
         return inner.trim().to_string();
     }
-    // A slash command's turn is nothing but its own tags. What the person
-    // typed is the name and the arguments; the rest is the harness talking.
-    if text.trim_start().starts_with("<command-name>") {
+    // A slash command's turn is nothing but its own tags, and which tag opens
+    // it is not fixed: a plugin's command leads with `<command-message>`. What
+    // the person typed is the name and the arguments, wherever the two sit; the
+    // rest is the harness talking.
+    let opening = text.trim_start();
+    if opening.starts_with("<command-name>") || opening.starts_with("<command-message>") {
         return command(text);
     }
     // A `!` command's turn is nothing but its own tag, and `!` is what the
@@ -171,6 +174,21 @@ mod tests {
     fn a_slash_command_shows_as_what_was_typed() {
         let text = "<command-name>/model</command-name>\n  <command-message>model</command-message>\n  <command-args>claude-opus-5</command-args>";
         assert_eq!(strip(text), "/model claude-opus-5");
+    }
+
+    /// A plugin's command writes its message first. The name is still what the
+    /// person typed, and the message is the harness repeating itself.
+    #[test]
+    fn a_plugin_command_leads_with_its_message_and_still_reads_as_its_name() {
+        let text = "<command-message>artful-simplicity:artful-simplicity</command-message>\n\
+<command-name>/artful-simplicity:artful-simplicity</command-name>";
+        assert_eq!(strip(text), "/artful-simplicity:artful-simplicity");
+
+        let with_args = format!("{text}\n<command-args>the arguments</command-args>");
+        assert_eq!(
+            strip(&with_args),
+            "/artful-simplicity:artful-simplicity the arguments"
+        );
     }
 
     #[test]

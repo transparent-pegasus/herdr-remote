@@ -186,9 +186,12 @@ message. Take the contents of `<user_query>` when present; drop `<system-reminde
 entirely (they carry skills instructions and the full AGENTS.md). Without this, every
 user card previews as `<user_info>OS Version: linux`.
 
-**Commands.** A turn that is nothing but its own tags is a command, not prose: a
-`<command-name>` turn previews as the name and arguments the person typed, and a
-`<bash-input>` turn as `! <command>` — the line the harness itself shows back. The answer
+**Commands.** A turn that is nothing but its own tags is a command, not prose: a slash
+command previews as the name and arguments the person typed, and a `<bash-input>` turn as
+`! <command>` — the line the harness itself shows back. Which tag opens a slash command is
+not fixed — a plugin's command writes `<command-message>` first — so the turn is
+recognized by either opening and the name and arguments are read wherever they sit. The
+answer
 is filed as the next turn (`<local-command-stdout>`, or `<bash-stdout>` and
 `<bash-stderr>` together) and belongs to the card above it rather than being a speaker of
 its own. Claude Code escapes `&`, `<` and `>` on the way into the two bash streams and

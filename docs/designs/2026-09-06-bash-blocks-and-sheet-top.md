@@ -73,3 +73,20 @@ has opened.
 Verified in Chrome at 390×844 against the built page: header 37px, sheet top 53px
 (37 + `--full-gap`), sheet bottom 732px (844 − 96 composer − `--full-gap`), header fully
 visible and undimmed above it, `one<br />two` on two lines.
+
+## Follow-ups, same day
+
+**A plugin's command was leaking its tags.** `strip` recognized a slash command by
+`starts_with("<command-name>")`, but the harness does not fix the order: a plugin's
+command writes `<command-message>` first, and
+`/artful-simplicity:artful-simplicity` reached the card with every tag around it. The
+entry test now accepts either opening; `command()` already read the name and arguments by
+position-independent search, so nothing below it changed. Confirmed against this
+repository's own transcript: `/model`, `! ls -la`, and both invocations of the plugin
+command now read as what was typed.
+
+**The sheet drops the `↪`.** The arrow marks a second bubble as the answer to the one
+above it — a distinction the list needs and the sheet does not, where the output is the
+whole of what is left to read. `outputRow` is now the list's alone, and the sheet appends
+an `.out-body` paragraph. The `clamp` flag that chose between the two shapes is gone with
+it: two callers, two functions, one idea each.

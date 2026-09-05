@@ -270,22 +270,24 @@
         return box;
       }
 
-      /** A command's own output, under the command it answered. The arrow sits
-       *  outside the bubble; in the list the text is clamped like any preview,
-       *  in the sheet it is the whole of it. */
-      function outputRow(text: string, clamp: boolean) {
+      /** A command's own output on the card that answered it: a second bubble,
+       *  clamped like any preview, with the arrow outside it. */
+      function outputRow(text: string) {
         const row = document.createElement("div");
         row.className = "out";
         // Our own markup, a constant; the output itself goes in as text.
         row.innerHTML = FORK;
-        if (clamp) {
-          row.append(bubble(text));
-        } else {
-          const body = document.createElement("p");
-          body.textContent = text;
-          row.append(body);
-        }
+        row.append(bubble(text));
         return row;
+      }
+
+      /** The same output in the sheet, where it is the whole of what is left to
+       *  read: no arrow, because nothing above it is being pointed away from. */
+      function outputBody(text: string) {
+        const body = document.createElement("p");
+        body.className = "out-body";
+        body.textContent = text;
+        return body;
       }
 
       function cardEl(card: Card, queued: boolean) {
@@ -296,7 +298,7 @@
         button.type = "button";
         button.dataset.seq = String(card.seq);
         button.append(bubble(card.preview));
-        if (card.output) button.append(outputRow(card.output, true));
+        if (card.output) button.append(outputRow(card.output));
         item.append(button);
         return item;
       }
@@ -354,7 +356,7 @@
         const { wrap, html } = modalContent(card);
         fullBodyEl.classList.toggle("wrap", wrap);
         fullBodyEl.innerHTML = html;
-        if (card.output) fullBodyEl.append(outputRow(card.output, false));
+        if (card.output) fullBodyEl.append(outputBody(card.output));
         fullBodyEl.scrollTop = 0;
         sizeSheets();
         // show(), not showModal(): the pane keeps being driven while a message
@@ -1325,8 +1327,7 @@
         align-items: center;
         gap: 0.5rem;
       }
-      .out > .bubble,
-      .out > p {
+      .out > .bubble {
         flex: 1;
         min-width: 0;
       }
@@ -1337,7 +1338,7 @@
         color: var(--muted);
       }
       /* In the sheet the output is the whole of it, and it is not markdown. */
-      #full .body .out > p {
+      #full .body .out-body {
         margin: 0;
         white-space: pre-wrap;
       }
