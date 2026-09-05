@@ -12,5 +12,5 @@ Cloudflare Access + Cloudflare Tunnel + Terraform + cloudflared + systemd + nfta
 
 ## Development Rules
 
-1. Follow `.claude/skills/artful-simplicity/SKILL.md` to keep the implementation to the bare minimum and pursue art-level simplicity.
+1. Follow `$artful-simplicity:artful-simplicity` to keep the implementation to the bare minimum and pursue art-level simplicity.
 2. The `any` type is prohibited in TypeScript.
