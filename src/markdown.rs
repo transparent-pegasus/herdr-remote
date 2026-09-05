@@ -28,7 +28,19 @@ fn safe_url(dest: CowStr<'_>) -> CowStr<'_> {
 /// to relative destinations and the http/https/mailto schemes, so an agent's
 /// output cannot script the page that displays it.
 pub fn to_html(md: &str) -> String {
+    render(md, false)
+}
+
+/// The same rendering for a person's own words, except that the newlines they
+/// typed stay newlines. Markdown folds a lone one into the paragraph, and the
+/// message would come back in a shape its writer never gave it.
+pub fn to_html_hard_breaks(md: &str) -> String {
+    render(md, true)
+}
+
+fn render(md: &str, hard_breaks: bool) -> String {
     let events = Parser::new_ext(md, options()).map(|event| match event {
+        Event::SoftBreak if hard_breaks => Event::HardBreak,
         Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
         Event::Start(Tag::Link {
             link_type,
@@ -65,10 +77,15 @@ pub fn to_html(md: &str) -> String {
 
 /// A preview of text that is not the parser's to read: the collapse and the
 /// cap `preview` ends with, without the parse that would eat a list's `1.`.
+/// The line breaks its writer typed survive — they are as much what they wrote
+/// as the words are — but the blank lines between them do not, so the card's
+/// three lines are spent on words.
 pub fn plain(text: &str, cap: usize) -> String {
-    text.split_whitespace()
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
-        .join(" ")
+        .join("\n")
         .chars()
         .take(cap)
         .collect()
@@ -174,9 +191,23 @@ mod tests {
 
     #[test]
     fn a_plain_preview_keeps_the_markers_the_parser_would_eat() {
-        assert_eq!(plain("1. one\n2. two", 300), "1. one 2. two");
+        assert_eq!(plain("1. one\n2. two", 300), "1. one\n2. two");
         assert_eq!(plain("  # not a heading  ", 300), "# not a heading");
         assert_eq!(plain(&"あ".repeat(500), 10).chars().count(), 10);
+    }
+
+    /// A typed line break is the writer's, a blank line is only air.
+    #[test]
+    fn a_plain_preview_keeps_line_breaks_and_drops_blank_lines() {
+        assert_eq!(plain("one\n\ntwo   three\n", 300), "one\ntwo three");
+    }
+
+    /// The agent wraps its prose and means one paragraph; the person pressed
+    /// the key and means two lines.
+    #[test]
+    fn only_a_persons_newline_becomes_a_line_break() {
+        assert!(to_html_hard_breaks("one\ntwo").contains("<br />"));
+        assert!(!to_html("one\ntwo").contains("<br />"));
     }
 
     #[test]

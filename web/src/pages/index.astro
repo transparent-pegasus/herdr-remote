@@ -234,6 +234,7 @@
       const transcriptEl =
         document.querySelector<HTMLOListElement>("#transcript")!;
       const emptyEl = document.querySelector<HTMLParagraphElement>("#empty")!;
+      const headerEl = document.querySelector<HTMLElement>("header")!;
       const fullEl = document.querySelector<HTMLDialogElement>("#full")!;
       const fullBodyEl = fullEl.querySelector<HTMLDivElement>(".body")!;
 
@@ -411,11 +412,18 @@
 
       let screenText = "";
 
-      /** Both sheets end where the composer begins, and so does the veil. */
+      /** Both sheets stand between the header and the composer, and so does the
+       *  veil. Both edges are measured rather than assumed: the composer grows
+       *  with its draft, and the header with whatever the workspace is called. */
       function sizeSheets() {
-        document.documentElement.style.setProperty(
+        const root = document.documentElement.style;
+        root.setProperty(
           "--composer-h",
           `${composerEl.getBoundingClientRect().height}px`,
+        );
+        root.setProperty(
+          "--header-h",
+          `${headerEl.getBoundingClientRect().height}px`,
         );
       }
 
@@ -1334,18 +1342,22 @@
         white-space: pre-wrap;
       }
       /* Plain text in one node, which is what lets the clamp cut at three lines and
-         append its ellipsis; markup would give it block children to trip on. */
+         append its ellipsis; markup would give it block children to trip on.
+         `pre-wrap` because the server leaves a writer's own line breaks in the
+         preview, and a command's output arrives as the lines it printed. */
       .preview {
         margin: 0;
         line-height: 1.6;
+        white-space: pre-wrap;
         display: -webkit-box;
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 3;
         line-clamp: 3;
         overflow: hidden;
       }
-      /* Both sheets go edge to edge and over the header, with air above and
-         below, and both stop where the composer begins. Both are opened with
+      /* Both sheets go edge to edge between the header and the composer, with
+         air above and below. The two controls that stay live while a sheet is
+         open are the two the sheet leaves showing. Both are opened with
          show() rather than showModal(): the pane stays drivable underneath,
          which is what a picker on the screen needs and what reading a message
          has no reason to take away. The only edges either draws are the two
@@ -1353,13 +1365,16 @@
       #full,
       #screen {
         position: fixed;
-        top: var(--full-gap);
+        top: calc(var(--header-h, 2.25rem) + var(--full-gap));
         left: 0;
         right: 0;
         z-index: 10;
         box-sizing: border-box;
         width: auto;
-        height: calc(100dvh - var(--composer-h, 9rem) - var(--full-gap) * 2);
+        height: calc(
+          100dvh - var(--header-h, 2.25rem) - var(--composer-h, 9rem) -
+            var(--full-gap) * 2
+        );
         max-width: none;
         max-height: none;
         flex-direction: column;
@@ -1379,12 +1394,13 @@
       #screen[open] {
         display: flex;
       }
-      /* The veil covers what the sheet took over and stops at the controls.
-         A non-modal dialog paints no backdrop of its own, so this is all of
-         it. */
+      /* The veil covers what the sheet took over and stops at the controls,
+         header and composer alike — both stay live while a sheet is open, so
+         neither is dimmed. A non-modal dialog paints no backdrop of its own,
+         so this is all of it. */
       body:has(#full[open], #screen[open])::after {
         position: fixed;
-        inset: 0 0 var(--composer-h, 9rem);
+        inset: var(--header-h, 2.25rem) 0 var(--composer-h, 9rem);
         z-index: 9;
         background: rgb(0 0 0 / 0.55);
         content: "";

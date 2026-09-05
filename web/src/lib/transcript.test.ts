@@ -222,13 +222,14 @@ test("the tail is followed only from the tail", () => {
 });
 
 test("a queued message shows below the transcript, escaped and collapsed", () => {
-	const card = sentCard({ after: 12, text: "  a <b>\n  two lines  " }, 0);
+	const card = sentCard({ after: 12, text: "  a <b>\n\n  two   lines  " }, 0);
 	expect(card.role).toBe("user");
 	expect(card.seq).toBeGreaterThan(12);
-	expect(card.preview).toBe("a <b> two lines");
+	// The break the sender typed survives; the blank line between does not.
+	expect(card.preview).toBe("a <b>\ntwo lines");
 	// The modal shows what was typed, whitespace and all; only the preview is
 	// collapsed, the way the server collapses its own.
-	expect(card.html).toBe("  a &lt;b&gt;\n  two lines  ");
+	expect(card.html).toBe("  a &lt;b&gt;\n\n  two   lines  ");
 });
 
 const arrived = (seq: number, role: "user" | "assistant" = "user") => ({

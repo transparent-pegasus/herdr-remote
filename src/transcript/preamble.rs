@@ -13,6 +13,11 @@ pub fn strip(text: &str) -> String {
     if text.trim_start().starts_with("<command-name>") {
         return command(text);
     }
+    // A `!` command's turn is nothing but its own tag, and `!` is what the
+    // person pressed to open it — the same line the harness itself shows back.
+    if let Some(typed) = tagged(text, "bash-input") {
+        return format!("! {}", typed.trim());
+    }
     let mut out = text.to_string();
     for (open, close) in [
         ("<system-reminder>", "</system-reminder>"),
@@ -29,11 +34,55 @@ pub fn strip(text: &str) -> String {
 /// so only a text that is nothing else is one. Terminal colour comes with it,
 /// and nothing on the phone renders it.
 pub fn command_output(text: &str) -> Option<String> {
-    let body = text
-        .trim()
-        .strip_prefix("<local-command-stdout>")?
-        .strip_suffix("</local-command-stdout>")?;
-    Some(without_ansi(body).trim().to_string())
+    if let Some(body) = tagged(text, "local-command-stdout") {
+        return Some(without_ansi(body).trim().to_string());
+    }
+    bash_output(text.trim())
+}
+
+/// A `!` command answers in two streams and Claude Code files both in one turn,
+/// escaping `&`, `<` and `>` on the way in. Both belong to the command above,
+/// and the rule between them is what stops the second reading as more of the
+/// first.
+fn bash_output(text: &str) -> Option<String> {
+    // The same guard the local-command tag carries: a turn that only begins
+    // with the tag is prose about it, and keeps every character.
+    if !text.starts_with("<bash-stdout>")
+        || !(text.ends_with("</bash-stderr>") || text.ends_with("</bash-stdout>"))
+    {
+        return None;
+    }
+    let stream = |open: &str, close: &str| {
+        let raw = between(text, open, close).unwrap_or_default();
+        without_ansi(&unescape(raw)).trim().to_string()
+    };
+    let streams = [
+        stream("<bash-stdout>", "</bash-stdout>"),
+        stream("<bash-stderr>", "</bash-stderr>"),
+    ];
+    Some(
+        streams
+            .into_iter()
+            .filter(|stream| !stream.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n---\n"),
+    )
+}
+
+/// The three the writer escapes, and only those. `&amp;` goes last: decoding it
+/// first would turn an escaped `&amp;lt;` into a `<` its writer never typed.
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// The body of a turn that is one tag and nothing else. Prose that merely
+/// quotes the tag is a person writing about it, and keeps every character.
+fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    text.trim()
+        .strip_prefix(&format!("<{tag}>"))?
+        .strip_suffix(&format!("</{tag}>"))
 }
 
 /// CSI sequences only, which is all a command's own output carries.
@@ -148,6 +197,61 @@ mod tests {
     fn prose_that_merely_mentions_the_tag_is_not_output() {
         assert!(command_output("see <local-command-stdout> in the file").is_none());
         assert!(command_output("plain words").is_none());
+    }
+
+    #[test]
+    fn a_bash_command_reads_the_way_it_was_typed() {
+        assert_eq!(strip("<bash-input>gpso main</bash-input>"), "! gpso main");
+    }
+
+    /// Same rule the slash command's tags follow: quoting one is not running it.
+    #[test]
+    fn prose_that_quotes_the_bash_tag_keeps_its_words() {
+        let text = "`<bash-input>` is where a `!` command lands";
+        assert_eq!(strip(text), text);
+    }
+
+    #[test]
+    fn a_bash_command_hands_its_streams_to_the_command_above() {
+        let text = "<bash-stdout>b5d0e18..314abca  main -&gt; main</bash-stdout>\
+<bash-stderr></bash-stderr>";
+        assert_eq!(
+            command_output(text).unwrap(),
+            "b5d0e18..314abca  main -> main"
+        );
+    }
+
+    #[test]
+    fn two_streams_are_told_apart_by_a_rule_between_them() {
+        let text = "<bash-stdout>done</bash-stdout><bash-stderr>warning: slow</bash-stderr>";
+        assert_eq!(command_output(text).unwrap(), "done\n---\nwarning: slow");
+    }
+
+    /// Only stderr spoke, so there is nothing for a rule to separate.
+    #[test]
+    fn a_stream_that_stayed_quiet_leaves_no_rule_behind() {
+        let text =
+            "<bash-stdout></bash-stdout><bash-stderr>zsh: command not found: pso\n</bash-stderr>";
+        assert_eq!(command_output(text).unwrap(), "zsh: command not found: pso");
+    }
+
+    /// The writer escapes `&` before `<`, so an `&lt;` its author typed arrives
+    /// as `&amp;lt;` and has to come back as `&lt;`, not as `<`.
+    #[test]
+    fn an_escaped_ampersand_decodes_once_not_twice() {
+        let text = "<bash-stdout>echo &amp;lt;a&amp;gt; &amp;amp; true</bash-stdout><bash-stderr></bash-stderr>";
+        assert_eq!(command_output(text).unwrap(), "echo &lt;a&gt; &amp; true");
+    }
+
+    #[test]
+    fn prose_that_opens_with_the_stream_tag_is_still_prose() {
+        assert!(command_output("<bash-stdout>x</bash-stdout> is where it lands").is_none());
+    }
+
+    #[test]
+    fn a_command_that_said_nothing_at_all_is_nothing_at_all() {
+        let text = "<bash-stdout></bash-stdout><bash-stderr></bash-stderr>";
+        assert_eq!(command_output(text).unwrap(), "");
     }
 
     #[test]

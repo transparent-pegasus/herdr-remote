@@ -89,12 +89,19 @@ const escapeText = (text: string): string =>
  *  when the agent takes it, which can be minutes. Until then it is shown from
  *  the copy we already have, below everything the file holds — which is where
  *  it will land, after the answer the agent is still writing. The preview is
- *  collapsed and capped the way the server collapses and caps its own. */
+ *  collapsed and capped the way the server collapses and caps its own — line
+ *  breaks kept, blank lines dropped — so the card does not change shape when
+ *  the file catches up. */
 export function sentCard(sent: Sent, index: number): Card {
 	return {
 		seq: Number.MAX_SAFE_INTEGER - index,
 		role: "user",
-		preview: sent.text.replace(/\s+/g, " ").trim().slice(0, 300),
+		preview: sent.text
+			.split("\n")
+			.map((line) => line.trim().replace(/\s+/g, " "))
+			.filter(Boolean)
+			.join("\n")
+			.slice(0, 300),
 		html: escapeText(sent.text),
 		wrap: true,
 	};

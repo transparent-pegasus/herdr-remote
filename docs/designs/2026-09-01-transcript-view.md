@@ -157,7 +157,8 @@ struct Message {
     seq: u64,        // order within the file; the `before=` cursor
     role: Role,      // User | Assistant
     preview: String, // markdown stripped, plain text, capped at 300 chars
-    html: String,    // Assistant: pulldown-cmark. User: escaped text.
+    html: String,    // pulldown-cmark, both roles; a user's newlines hardened
+    output: Option<String>, // a `/` or `!` command's own answer
 }
 ```
 
@@ -184,6 +185,17 @@ message. Take the contents of `<user_query>` when present; drop `<system-reminde
 `<user_info>`, and `<timestamp>` blocks; drop codex's `role: developer` messages
 entirely (they carry skills instructions and the full AGENTS.md). Without this, every
 user card previews as `<user_info>OS Version: linux`.
+
+**Commands.** A turn that is nothing but its own tags is a command, not prose: a
+`<command-name>` turn previews as the name and arguments the person typed, and a
+`<bash-input>` turn as `! <command>` — the line the harness itself shows back. The answer
+is filed as the next turn (`<local-command-stdout>`, or `<bash-stdout>` and
+`<bash-stderr>` together) and belongs to the card above it rather than being a speaker of
+its own. Claude Code escapes `&`, `<` and `>` on the way into the two bash streams and
+nothing else, so exactly those three are decoded back — `&amp;` last, or an author's own
+`&lt;` would decode twice. Both streams in one turn are joined by a `---` rule, which is
+what stops the second reading as more of the first. Quoting a tag in prose is not running
+it: only a turn that is the tag and nothing else is read as one.
 
 ## Markdown rendering
 
@@ -250,7 +262,8 @@ The user accepted the desktop-side effect: they do not watch the PC while using 
 
 **Cards.** Two lanes: the user's own messages right-aligned on an accent ground in a
 proportional face, the agent's left-aligned and full width. The preview is plain text in
-one node, clamped by CSS:
+one node, `pre-wrap` so a writer's own line breaks and a command's printed lines survive
+the collapse, clamped by CSS:
 
 ```css
 display: -webkit-box; -webkit-box-orient: vertical;
@@ -258,8 +271,8 @@ display: -webkit-box; -webkit-box-orient: vertical;
 ```
 
 Verified rendering: three lines then `…`, and short messages untouched. Tapping a card
-opens a native nonmodal `<dialog>` via `show()` — the agent's rendered HTML, or the user's
-text as `pre-wrap`. Escape and the close button dismiss it while the composer remains
+opens a native nonmodal `<dialog>` via `show()`, carrying the same rendered HTML the card
+previews. Escape and the close button dismiss it while the composer remains
 usable.
 
 **Workspaces.** The Lucide folder button sits immediately left of Back and is hidden on
@@ -374,15 +387,19 @@ browser paints exactly those values.
 
 ## The two sheets, and who may act while one is open
 
-A message and the pane's screen open into the same shape: fixed, edge to edge, over the
-header, `--full-gap` of air above and below, and the same `1px solid var(--edge)` rule on
+A message and the pane's screen open into the same shape: fixed, edge to edge between the
+header and the composer, `--full-gap` of air above and below, and the same
+`1px solid var(--edge)` rule on
 the top and bottom that the composer already draws against the page. One continuous
 surface: the lucide `x` floats over its foot at `position: absolute`, and the `3rem` of
 bottom padding on the text is what keeps the two apart — inside the scroller, so the end
 of a long message clears it, and inside the box `fitScreen` measures, so a screen is never
 scaled under it. A veil of `rgb(0 0 0 / 0.55)` covers everything the sheets cover and
-stops at the composer, which no `::backdrop` could do: `showModal()` paints its backdrop
-over the whole viewport, controls included.
+stops at the two controls that stay live under them — the header above and the composer
+below — which no `::backdrop` could do: `showModal()` paints its backdrop over the whole
+viewport, controls included. Both edges are measured into `--header-h` and `--composer-h`
+rather than assumed: the composer grows with its draft and the header with whatever the
+workspace is called.
 
 Both sheets park focus on their text, which carries `tabindex="-1"`. The dialog focusing
 steps run for `show()` as well as `showModal()`, and would otherwise ring the close

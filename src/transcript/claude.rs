@@ -176,6 +176,21 @@ mod tests {
         assert_eq!(output, "Set model to Opus 5");
     }
 
+    /// A `!` command is one card too: the command is the turn, and the streams
+    /// it answered with are the tail of it.
+    #[test]
+    fn a_bash_command_and_its_streams_are_one_card() {
+        let typed = r#"{"type":"user","message":{"content":"<bash-input>gpso main</bash-input>"}}"#;
+        assert_eq!(message(typed, 5).unwrap().text, "! gpso main");
+
+        let answered = r#"{"type":"user","message":{"content":
+            "<bash-stdout>main -&gt; main</bash-stdout><bash-stderr></bash-stderr>"}}"#;
+        let Some(Parsed::Output(output)) = parse_line(answered, 6) else {
+            panic!("not output")
+        };
+        assert_eq!(output, "main -> main");
+    }
+
     #[test]
     fn an_empty_output_is_nothing_at_all() {
         let line = r#"{"type":"user","message":{"content":

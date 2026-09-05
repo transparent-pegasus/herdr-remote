@@ -257,7 +257,13 @@ fn card(message: &transcript::Message) -> Card {
         },
         // Both speakers write markdown, and the renderer escapes raw HTML and
         // gates link and image schemes, so neither half can script the page.
-        html: markdown::to_html(&message.text),
+        // Only the person's newlines are line breaks: an agent wrapping its
+        // prose means one paragraph, and a person pressing the key means two
+        // lines.
+        html: match message.role {
+            transcript::Role::Assistant => markdown::to_html(&message.text),
+            transcript::Role::User => markdown::to_html_hard_breaks(&message.text),
+        },
         // A command's output is not markdown and not anyone's words: it goes
         // as text, and the phone gives it a node of its own.
         output: message.output.clone(),
@@ -2047,6 +2053,20 @@ mod tests {
         });
         assert!(agent.html.contains("<strong>hi</strong>"));
         assert_eq!(agent.output, None);
+    }
+
+    /// The person pressed the key twice; the card shows two lines, in the list
+    /// and in the sheet alike.
+    #[test]
+    fn a_users_own_line_breaks_reach_the_card() {
+        let user = card(&herdr_remote::transcript::Message {
+            seq: 0,
+            role: herdr_remote::transcript::Role::User,
+            text: "one\ntwo".into(),
+            output: None,
+        });
+        assert!(user.html.contains("<br />"));
+        assert_eq!(user.preview, "one\ntwo");
     }
 
     #[test]
