@@ -184,8 +184,8 @@ function isPage(value: unknown): value is Page {
 	);
 }
 
-/** `null` means the pane has no transcript — a shell, or an agent whose session
- *  file could not be resolved — and the caller falls back to raw output.
+/** `null` means a shell or unsupported agent uses raw output. A supported
+ *  agent awaiting its session file has an empty page instead.
  *  `"unchanged"` is the 304 that keeps a quiet poll free. */
 export async function fetchTranscript(
 	paneId: string,
@@ -212,8 +212,12 @@ export async function fetchTranscript(
 	if (!isPage(body)) {
 		throw new Error("unexpected response from the transcript route");
 	}
-	if (newest && tag) etags.set(paneId, tag);
-	return body;
+	if (newest) {
+		if (tag) etags.set(paneId, tag);
+		else etags.delete(paneId);
+	}
+	const source = response.headers.get("x-transcript-id");
+	return source ? { ...body, source } : body;
 }
 
 function isLive(value: unknown): value is Live {

@@ -330,6 +330,101 @@ test("the newest window carries its stored etag and a 304 reads as unchanged", a
 	expect(seen[1]["if-none-match"]).toBe('"7-tail-30"');
 });
 
+test.each([undefined, 42])(
+	"a transcript response exposes its source header for before=%s",
+	async (before) => {
+		forgetPane("w1:p1");
+		const body = {
+			messages: [
+				{
+					seq: 10,
+					role: "assistant",
+					preview: "answer",
+					html: "<p>answer</p>",
+					output: "done",
+				},
+			],
+			has_more: true,
+		};
+		vi.stubGlobal(
+			"fetch",
+			stubFetch(() => page(body, { "x-transcript-id": "source-A" })),
+		);
+		try {
+			await expect(fetchTranscript("w1:p1", before)).resolves.toEqual({
+				...body,
+				source: "source-A",
+			});
+		} finally {
+			forgetPane("w1:p1");
+			vi.unstubAllGlobals();
+		}
+	},
+);
+
+test("a successful newest response without an etag clears the previous validator", async () => {
+	forgetPane("w1:p1");
+	const seen: Array<string | null> = [];
+	vi.stubGlobal(
+		"fetch",
+		stubFetch((_url, init) => {
+			seen.push(new Headers(init?.headers).get("if-none-match"));
+			return seen.length === 1
+				? page(
+						{ messages: [], has_more: false },
+						{ etag: '"source-A-tail"', "x-transcript-id": "source-A" },
+					)
+				: page({ messages: [], has_more: false });
+		}),
+	);
+	try {
+		await fetchTranscript("w1:p1");
+		await expect(fetchTranscript("w1:p1")).resolves.toEqual({
+			messages: [],
+			has_more: false,
+		});
+		await fetchTranscript("w1:p1");
+		expect(seen).toEqual([null, '"source-A-tail"', null]);
+	} finally {
+		forgetPane("w1:p1");
+		vi.unstubAllGlobals();
+	}
+});
+
+test.each([undefined, '"older-page"'])(
+	"pagination with etag=%s leaves the newest validator intact",
+	async (olderTag) => {
+		forgetPane("w1:p1");
+		const seen: Array<string | null> = [];
+		vi.stubGlobal(
+			"fetch",
+			stubFetch((_url, init) => {
+				seen.push(new Headers(init?.headers).get("if-none-match"));
+				if (seen.length === 1)
+					return page({ messages: [], has_more: false }, { etag: '"newest"' });
+				if (seen.length === 2)
+					return page(
+						{ messages: [], has_more: true },
+						olderTag ? { etag: olderTag } : {},
+					);
+				return new Response(null, { status: 304 });
+			}),
+		);
+		try {
+			await fetchTranscript("w1:p1");
+			await expect(fetchTranscript("w1:p1", 42)).resolves.toEqual({
+				messages: [],
+				has_more: true,
+			});
+			await expect(fetchTranscript("w1:p1")).resolves.toBe("unchanged");
+			expect(seen).toEqual([null, null, '"newest"']);
+		} finally {
+			forgetPane("w1:p1");
+			vi.unstubAllGlobals();
+		}
+	},
+);
+
 test("reaching further back asks for a window and never sends the etag", async () => {
 	forgetPane("w1:p1");
 	const fetchMock = stubFetch((_url, init) => {

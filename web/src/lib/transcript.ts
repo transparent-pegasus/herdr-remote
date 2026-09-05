@@ -10,7 +10,14 @@ export type Card = {
 	wrap?: true;
 };
 
-export type Page = { messages: Card[]; has_more: boolean };
+export type Page = {
+	messages: Card[];
+	has_more: boolean;
+	/** Opaque source identity from the response header; absent before resolution. */
+	source?: string;
+};
+
+export type TranscriptState = { source?: string; cards: Card[]; sent: Sent[] };
 
 export function agentRawState(screen?: string):
 	| {
@@ -146,6 +153,18 @@ export function settle(sent: Sent[], cards: Card[]): Sent[] {
 	const same =
 		rest.length === sent.length && rest.every((one, at) => one === sent[at]);
 	return same ? sent : rest;
+}
+
+/** A source change replaces the conversation, including loaded earlier pages.
+ *  Input typed while awaiting a source still belongs to the incoming session. */
+export function receivePage(
+	state: TranscriptState,
+	page: Page,
+): TranscriptState {
+	const changed = state.source !== page.source;
+	const cards = replaceTail(changed ? [] : state.cards, page.messages);
+	const sent = changed && state.source ? [] : state.sent;
+	return { source: page.source, cards, sent: settle(sent, cards) };
 }
 
 /** Both speakers' halves are markdown the server rendered. Only a message this

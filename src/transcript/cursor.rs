@@ -67,9 +67,27 @@ fn blob(connection: &Connection, id: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("cursor blob {id} is missing"))
 }
 
-/// The root blob is protobuf: a repeated length-delimited field, every entry a
-/// 32-byte id. Reading the two framing bytes is cheaper and more predictable
-/// than pulling in a protobuf runtime for one shape.
+/// Read a protobuf varint without accepting truncation or overflowing u64.
+fn varint(bytes: &mut &[u8]) -> Result<u64> {
+    let mut value = 0;
+    for shift in (0..70).step_by(7) {
+        let (&byte, rest) = bytes
+            .split_first()
+            .context("cursor root blob ends mid-varint")?;
+        *bytes = rest;
+        if shift == 63 && byte > 1 {
+            bail!("cursor root blob varint overflows");
+        }
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            return Ok(value);
+        }
+    }
+    bail!("cursor root blob varint overflows")
+}
+
+/// Field 1 holds 32-byte message ids. Other fields hold session metadata and
+/// are skipped by their wire type, including multibyte tags and lengths.
 ///
 /// Framing that does not parse to the end is an error rather than a shorter
 /// list: a truncated read would render as a complete conversation that is
@@ -78,15 +96,32 @@ fn blob_ids(root: &[u8]) -> Result<Vec<String>> {
     let mut ids = Vec::new();
     let mut rest = root;
     while !rest.is_empty() {
-        let (tag, len) = match rest {
-            [tag, len, ..] => (*tag, *len as usize),
-            _ => bail!("cursor root blob ends mid-frame"),
-        };
-        if tag != 0x0a || rest.len() < 2 + len {
-            bail!("cursor root blob has unexpected framing");
+        let tag = varint(&mut rest)?;
+        let field = tag >> 3;
+        let wire = tag & 7;
+        if field == 0 || field > 0x1fff_ffff || (field == 1 && wire != 2) {
+            bail!("cursor root blob has an invalid field");
         }
-        ids.push(hex(&rest[2..2 + len]));
-        rest = &rest[2 + len..];
+        let len = match wire {
+            0 => {
+                varint(&mut rest)?;
+                continue;
+            }
+            1 => 8,
+            2 => usize::try_from(varint(&mut rest)?).context("cursor root field is too large")?,
+            5 => 4,
+            _ => bail!("cursor root blob has an unsupported wire type"),
+        };
+        let (bytes, tail) = rest
+            .split_at_checked(len)
+            .context("cursor root blob ends mid-field")?;
+        if field == 1 {
+            if len != 32 {
+                bail!("cursor message id is not 32 bytes");
+            }
+            ids.push(hex(bytes));
+        }
+        rest = tail;
     }
     Ok(ids)
 }
@@ -203,6 +238,74 @@ mod tests {
         assert_eq!(messages[1].text, "on it");
     }
 
+    fn root_with_metadata(first: [u8; 32], second: [u8; 32]) -> Vec<u8> {
+        // Synthetic examples of observed fields 5, 8, 10, 18 and 26, plus
+        // fixed-width metadata. Only field 1 contains message references.
+        let mut root = vec![0x2a, 0xb1, 0x02]; // field 5, 305 bytes
+        root.extend([0x6d; 305]);
+        root.extend([0x0a, 32]);
+        root.extend(first);
+        root.push(0x11); // field 2, fixed64
+        root.extend([0xff; 8]);
+        root.push(0x1d); // field 3, fixed32
+        root.extend([0xff; 4]);
+        root.extend([0x42, 32]); // field 8, not a message reference
+        root.extend([0xee; 32]);
+        root.extend([0x50, 0x01]); // field 10, varint 1
+        root.extend([0x92, 0x01, 3, 0, 0xff, 0x80]); // field 18, three bytes
+        root.extend([0x0a, 32]);
+        root.extend(second);
+        root.extend([0xd0, 0x01, 0x80, 0xd0, 0x95, 0xff, 0xbc, 0x31]); // field 26, timestamp
+        root
+    }
+
+    #[test]
+    fn root_metadata_preserves_message_reference_order() {
+        let root = root_with_metadata([0x22; 32], [0x11; 32]);
+        assert_eq!(
+            blob_ids(&root).unwrap(),
+            vec!["22".repeat(32), "11".repeat(32)]
+        );
+    }
+
+    #[test]
+    fn root_metadata_keeps_visible_messages_when_reading_the_store() {
+        let dir = tempdir();
+        let path = store(
+            &dir,
+            &[("user", "first question"), ("assistant", "second answer")],
+        );
+        let mut second = [0; 32];
+        second[31] = 1;
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "update blobs set data = ?1 where id = ?2",
+                rusqlite::params![root_with_metadata([0; 32], second), format!("{:064x}", 999)],
+            )
+            .unwrap();
+        drop(connection);
+
+        let (_, messages) = read(&path).unwrap();
+        assert_eq!(
+            messages,
+            vec![
+                Message {
+                    seq: 0,
+                    role: Role::User,
+                    text: "first question".into(),
+                    output: None
+                },
+                Message {
+                    seq: 1,
+                    role: Role::Assistant,
+                    text: "second answer".into(),
+                    output: None
+                },
+            ]
+        );
+    }
+
     /// A hole in the conversation must not render as a whole conversation.
     #[test]
     fn a_missing_blob_refuses_rather_than_leaving_a_hole() {
@@ -221,6 +324,73 @@ mod tests {
         assert!(blob_ids(&[0x0a, 32, 0, 0]).is_err());
         assert!(blob_ids(&[0x12, 32]).is_err());
         assert!(blob_ids(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn message_references_require_exactly_32_bytes() {
+        for length in [0, 1, 31, 33, 127] {
+            let mut root = vec![0x0a, length];
+            root.extend(vec![0x11; length as usize]);
+            assert!(
+                blob_ids(&root).is_err(),
+                "accepted a {length}-byte reference"
+            );
+        }
+    }
+
+    #[test]
+    fn message_references_reject_other_wire_types() {
+        for root in [
+            vec![0x08, 1],
+            vec![0x09, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x0d, 0, 0, 0, 0],
+        ] {
+            assert!(blob_ids(&root).is_err(), "accepted {root:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_metadata_cannot_silently_shorten_the_conversation() {
+        let cases = [
+            ("truncated tag", vec![0x80]),
+            ("unterminated tag", vec![0x80; 10]),
+            ("overflowing tag", [vec![0xff; 9], vec![2]].concat()),
+            ("missing varint", vec![0x50]),
+            ("truncated varint", vec![0x50, 0x80]),
+            ("unterminated varint", [vec![0x50], vec![0x80; 10]].concat()),
+            (
+                "overflowing varint",
+                [vec![0x50], vec![0xff; 9], vec![2]].concat(),
+            ),
+            ("truncated fixed64", vec![0x11, 0, 0, 0, 0, 0, 0, 0]),
+            ("truncated fixed32", vec![0x1d, 0, 0, 0]),
+            ("missing length", vec![0x2a]),
+            ("truncated length", vec![0x2a, 0x80]),
+            (
+                "overflowing length",
+                [vec![0x2a], vec![0xff; 9], vec![2]].concat(),
+            ),
+            (
+                "truncated long metadata",
+                [vec![0x2a, 0x81, 0x01], vec![0; 128]].concat(),
+            ),
+            ("zero tag", vec![0]),
+            ("field zero", vec![0x02, 0]),
+            (
+                "field number too large",
+                vec![0x80, 0x80, 0x80, 0x80, 0x10, 0],
+            ),
+            ("wire type 6", vec![0x16]),
+            ("wire type 7", vec![0x17]),
+            ("unsupported group", vec![0x13, 0x14]),
+            ("unmatched end group", vec![0x14]),
+        ];
+        for (label, malformed) in cases {
+            let mut root = vec![0x0a, 32];
+            root.extend([0x11; 32]);
+            root.extend(malformed);
+            assert!(blob_ids(&root).is_err(), "accepted {label}");
+        }
     }
 
     #[test]

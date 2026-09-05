@@ -72,9 +72,9 @@ Three surfaces, chosen by pane type. No user-facing toggle.
 
 | Layer | Source | Applies to |
 | --- | --- | --- |
-| History | transcript file (4 formats) | agent pane whose transcript resolved |
+| History | transcript file (4 formats) | supported agent panes; empty while the source is unavailable |
 | Live | `pane.read source=visible` | every agent pane |
-| Raw output (existing) | `pane.read` | shell panes, and agent panes whose transcript did not resolve |
+| Raw output (existing) | `pane.read` | shell panes and unsupported agents |
 
 The raw-output view stays and its `Source::Scrollback` changes from `recent` to
 `recent_unwrapped`, which is the root-cause fix for the wrapping complaint on the
@@ -96,10 +96,10 @@ body-less 304 even for a 44 MB transcript. Live changes on every keystroke.
 
 `/transcript` without `before` returns the newest `limit` messages, oldest first, plus
 `has_more`. With `before=<seq>` it returns the `limit` messages whose `seq` is strictly
-less than that value, which is what the "earlier" button sends. A pane with no resolved
-transcript answers 404 with a short reason; that response is the client's signal to use
-the raw-output view, not an error to show. A resolved transcript holding no messages yet
-is still the transcript view — an agent that has not spoken is not a failure to resolve.
+less than that value, which is what the "earlier" button sends. Shells and unsupported
+agents answer 404, selecting the raw-output view. Supported agents whose source is not
+available return 200 with empty messages and `has_more: false`. An agent that has not
+spoken still uses the history view.
 
 `/live` answers `{ screen, composer }`: the whole visible screen as text, and the
 extracted first line of the composer, empty when extraction found nothing.
@@ -115,7 +115,7 @@ benefits from the same width.
 | agent | resolution |
 | --- | --- |
 | claude | `~/.claude/projects/<cwd slug>/<uuid>.jsonl`; the slug replaces `/` and `.` with `-` (`/mnt/ssd1/repos/herdr-remote` → `-mnt-ssd1-repos-herdr-remote`). If absent, search `projects/*/` for `<uuid>.jsonl` |
-| codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*-<uuid>.jsonl`, newest date directories first. Without an id, the newest rollout whose first line's `session_meta.payload.cwd` equals the pane's cwd |
+| codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*-<uuid>.jsonl`, newest matching rollout first. A nonempty reported id or guarded reported path is required; no cwd fallback |
 | grok | `~/.grok/sessions/<percent-encoded cwd>/<uuid>/chat_history.jsonl`; without an id, the newest session directory under that cwd |
 | cursor | herdr's id does not identify the store. Scan `~/.cursor/chats/*/*/meta.json` for `cwd` match and `hasConversation: true`, keep only entries whose `updatedAtMs` is at or after the reported id's own `createdAtMs`, prefer the entry whose `title` equals the pane's `terminal_title`, else the newest `updatedAtMs` |
 
@@ -123,9 +123,9 @@ benefits from the same width.
 
 **`agent_session` is often absent.** Measured on this host with all four agents running in
 one tab: the grok pane reported no session at all, and both codex panes reported none
-until they had taken a turn. Resolution therefore treats the id as an optimization, not a
-requirement, and every agent has a cwd-based path to its file. A codex pane that has never
-run has no rollout file either — that resolves to "no transcript", which is correct.
+until they had taken a turn. Codex therefore shows empty history until its own identity
+is available: another session may already have a rollout in the same cwd. The other
+agents retain the discovery rules in the table above.
 
 Cursor's mismatch is measured, not hypothetical: pane `w2:p5` reported session
 `c4d9d2bd…`, whose directory holds only `prompt_history.json` with
@@ -147,7 +147,7 @@ created and updated after the reported session began.
 the resolved path and requires it to sit under one of four roots —
 `~/.claude/projects`, `~/.codex/sessions`, `~/.cursor/chats`, `~/.grok/sessions` — and
 to have the expected file shape (`.jsonl`, or `store.db`). Anything else resolves to
-"no transcript", and the pane falls back to raw output. Canonicalization also closes
+no source, leaving a supported agent's history empty. Canonicalization also closes
 symlink escapes. Cloudflare Access guards the tunnel; this is the guard inside the app.
 
 ## Normalization
@@ -206,8 +206,21 @@ Per pane: `{ path, offset, len, Vec<Message> }` held in the process.
 - Poll compares file length. Unchanged → 304, no body, no parse.
 - Grown → read from `offset`, parse only the appended bytes, append to the vector.
 - Shrunk → reparse from the start (truncation or rotation).
-- Cursor has no byte offset: `meta.latestRootBlobId` is both the ETag and the cache key;
-  a new root walks the blob DAG again.
+- Cursor has no byte offset: `meta.latestRootBlobId` is its revision;
+  a new root walks the message references again. Its protobuf root can also carry
+  metadata fields, which are skipped by wire type with bounds checks. Field 1 alone
+  carries the ordered 32-byte message references.
+
+The ETag includes the source identity, revision, and requested window. The opaque
+`x-transcript-id` header identifies the resolved path and format without exposing the
+path. A different source clears old cards, queued copies, expanded messages, and pending
+pagination results in the client. Delayed send acknowledgements affect only the pane and
+conversation where the send began. Input sent while awaiting a source is retained for
+the incoming session. A supported-agent empty response has neither header; the client
+clears its previous validator. Resolution misses and closes invalidate older request
+tickets, including requests still resolving or refreshing; subsequent requests can retry
+a miss. Cache hits advance the latest confirmed ticket so an older miss cannot erase a
+newer confirmed session.
 
 A 44 MB transcript is walked once, when the pane is first opened.
 
@@ -223,7 +236,7 @@ The user accepted the desktop-side effect: they do not watch the PC while using 
 ## Front end
 
 ```
-[back] pane name
+[folder] [back] pane name
 ┌──────────────────────────────┐
 │ ol#transcript      3-line cards  │
 └──────────────────────────────┘
@@ -245,9 +258,18 @@ display: -webkit-box; -webkit-box-orient: vertical;
 ```
 
 Verified rendering: three lines then `…`, and short messages untouched. Tapping a card
-opens a native `<dialog>` via `showModal()` — the agent's rendered HTML, or the user's
-text as `pre-wrap`. Escape, the close button, and the backdrop all dismiss it; the focus
-trap is the browser's.
+opens a native nonmodal `<dialog>` via `show()` — the agent's rendered HTML, or the user's
+text as `pre-wrap`. Escape and the close button dismiss it while the composer remains
+usable.
+
+**Workspaces.** The Lucide folder button sits immediately left of Back and is hidden on
+the root workspace selection page. Its named `showModal()` dialog reuses workspace rows;
+choosing one navigates to that workspace's tabs. Close, Escape, or tapping the backdrop
+dismisses it. Session updates preserve the focused workspace, or move focus to Close if
+it disappears. Navigation and browser history close the picker and pane sheets.
+
+**Input.** Shell panes set `autocapitalize="none"`; agent panes set `sentences` before
+the composer receives focus, including when an agent attaches to an existing pane.
 
 **Appending.** Reuse the existing `paint()` discipline: identical bytes touch no DOM.
 Append only new messages, keep the current follow-the-tail rule (follow when the reader
@@ -370,12 +392,13 @@ They differ only in who may act:
 
 | sheet | opened with | the controls below | content |
 | --- | --- | --- | --- |
-| a message | `showModal()` | inert, dimmed to 0.55 — the state they wear outside a pane | scrolls |
+| a message | `show()` | live | scrolls |
 | the screen | `show()` | live | scaled to fit, never scrolls |
 
 The screen's modality follows from what it is for: a `/model` picker on it is answered with
-the arrow keys and Enter in the composer, so a modal would make the sheet useless. A
-message has nothing to answer, so reading one is a detour and the controls step back.
+the arrow keys and Enter in the composer. Reading a message also keeps those controls
+available. The folder shortcut sits above both sheets. Its workspace picker is modal;
+Escape closes that top dialog without also dismissing the sheet beneath it.
 
 The screen is scaled rather than wrapped because it is a fixed grid of characters whose
 boxes wrapping would break: `transform: scale()` on a `width: max-content` `<pre>`, the
@@ -396,9 +419,9 @@ hand-or-eraser icon.
 
 ## Degradation
 
-- No `agent_session`, or a path outside the allowed roots, or a resolution miss →
-  raw-output view. The pane still works exactly as it does today.
-- Transcript file disappears mid-session → drop the cache entry and fall back.
+- A resolution miss or refused path leaves supported-agent history empty. Shells and
+  unsupported agents use raw output. Codex never guesses a session from its cwd.
+- Transcript file disappears mid-session → drop the cache entry and show empty history.
 - herdr unreachable → the existing error path is unchanged.
 - Composer extraction fails → the band's left half is blank; the button still opens the
   full screen.
@@ -433,8 +456,7 @@ maximize on a `/model` picker → close and confirm the pane unzoomed.
   and a window of time. The `createdAtMs` floor removes the common case (a stale chat from
   an earlier day) but not this one. It degrades to a wrong-but-real transcript rather than
   to an error, which is the least defensible failure in this design.
-- Codex without a reported session id is matched by cwd, so two codex panes in the same
-  directory resolve to the same newest rollout until herdr reports their ids.
+- Codex history remains empty until herdr reports its session id or transcript path.
 - TUI redraws change the composer box shape between agent versions. The blank-on-failure
   rule bounds the damage.
 - The path boundary validates a pathname and then opens it, so a local process able to
@@ -451,10 +473,9 @@ maximize on a `/model` picker → close and confirm the pane unzoomed.
   taking a turn leaves its card standing until the pane is left. Nothing on the card
   claims it was delivered; it is simply the last thing the reader sent.
 - A transcript file replaced atomically by one of exactly the same length is not detected
-  by the cache, which compares length. The phone replaces its tail from every newest
-  window and the server re-resolves when the pane's identity changes, which covers the
-  realistic cases; tracking inode identity for the remainder was judged not worth the
-  state.
+  by the cache, which compares length. This same-path limitation is distinct from
+  switching to a different session file, which changes the source identity and clears
+  the previous conversation. Inode identity is not tracked.
 - The zoomed pane hides its siblings on the desktop for as long as the phone holds it
   open. Accepted explicitly.
 - Zoom is not a legibility guarantee. It gives the pane the herdr window's full width, and

@@ -5,11 +5,14 @@ import {
 	type Card,
 	following,
 	modalContent,
+	type Page,
 	prepend,
+	receivePage,
 	replaceTail,
 	type Sent,
 	sentCard,
 	settle,
+	type TranscriptState,
 } from "./transcript";
 
 const card = (seq: number, role: Card["role"] = "assistant"): Card => ({
@@ -67,6 +70,122 @@ test("replaceTail keeps loaded history when the newest window starts after a gap
 			(c) => c.seq,
 		),
 	).toEqual([1, 2, 3, 30, 31]);
+});
+
+test("a new source discards every old card even when its window starts at seq 10", () => {
+	const state: TranscriptState = {
+		source: "A",
+		cards: [card(0), card(1), card(30)],
+		sent: [{ after: 30, text: "queued for A" }],
+	};
+	const messages = [
+		{ ...card(10), preview: "B answer", html: "<p>B answer</p>" },
+	];
+	const page: Page = { source: "B", messages, has_more: true };
+	expect(receivePage(state, page)).toEqual({
+		source: "B",
+		cards: messages,
+		sent: [],
+	});
+});
+
+test("A to unresolved to B drops old sends and preserves input typed while unresolved", () => {
+	const state: TranscriptState = {
+		source: "A",
+		cards: [card(1), card(30)],
+		sent: [{ after: 30, text: "queued for A" }],
+	};
+	const empty: Page = { messages: [], has_more: false };
+	const unresolved = receivePage(state, empty);
+	expect(unresolved).toEqual({ source: undefined, cards: [], sent: [] });
+	const pending = [{ after: -1, text: "typed for B" }];
+	const waiting = receivePage({ ...unresolved, sent: pending }, empty);
+	expect(waiting).toEqual({ source: undefined, cards: [], sent: pending });
+	const messages = [
+		{ ...card(10), preview: "B answer", html: "<p>B answer</p>" },
+	];
+	expect(
+		receivePage(waiting, { source: "B", messages, has_more: true }),
+	).toEqual({
+		source: "B",
+		cards: messages,
+		sent: pending,
+	});
+});
+
+test("the same source replaces its tail while preserving loaded history and queued sends", () => {
+	const sent = [{ after: 10, text: "still queued" }];
+	const state: TranscriptState = {
+		source: "A",
+		cards: [card(1), card(2), card(10), card(11), card(12)],
+		sent,
+	};
+	const rewritten = {
+		...card(10),
+		preview: "rewritten",
+		html: "<p>rewritten</p>",
+	};
+	expect(
+		receivePage(state, {
+			source: "A",
+			messages: [rewritten, card(11)],
+			has_more: true,
+		}),
+	).toEqual({
+		source: "A",
+		cards: [card(1), card(2), rewritten, card(11)],
+		sent,
+	});
+});
+
+test("a same-source arrival settles a queued send only once across repeated pages", () => {
+	const state: TranscriptState = {
+		source: "A",
+		cards: [card(1, "user"), card(10)],
+		sent: [
+			{ after: 10, text: "first" },
+			{ after: 10, text: "second" },
+		],
+	};
+	const messages = [
+		{ ...card(11, "user"), preview: "first", html: "<p>first</p>" },
+		card(12),
+	];
+	const page = { source: "A", messages, has_more: true };
+	const received = receivePage(state, page);
+	expect(received).toEqual({
+		source: "A",
+		cards: [card(1, "user"), card(10), ...messages],
+		sent: [{ after: 11, text: "second" }],
+	});
+	expect(receivePage(received, page)).toEqual(received);
+});
+
+test("the first known source keeps legitimate pending input until its user turn arrives", () => {
+	const pending = [{ after: -1, text: "first prompt" }];
+	const state: TranscriptState = { cards: [], sent: pending };
+	const first = receivePage(state, {
+		source: "A",
+		messages: [card(0)],
+		has_more: false,
+	});
+	expect(first).toEqual({ source: "A", cards: [card(0)], sent: pending });
+	const arrival = {
+		...card(1, "user"),
+		preview: "first prompt",
+		html: "<p>first prompt</p>",
+	};
+	expect(
+		receivePage(first, {
+			source: "A",
+			messages: [card(0), arrival],
+			has_more: false,
+		}),
+	).toEqual({
+		source: "A",
+		cards: [card(0), arrival],
+		sent: [],
+	});
 });
 
 test("prepend puts older messages in front, without duplicating the overlap", () => {

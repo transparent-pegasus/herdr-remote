@@ -40,6 +40,7 @@ impl TranscriptIdentity {
 
 struct CacheEntry {
     identity: TranscriptIdentity,
+    /// Newest request that confirmed this identity, including cache hits.
     ticket: u64,
     transcript: Arc<Mutex<Transcript>>,
 }
@@ -47,6 +48,7 @@ struct CacheEntry {
 #[derive(Default)]
 struct TranscriptCache {
     entries: HashMap<String, CacheEntry>,
+    /// Closes and resolution misses both invalidate older requests.
     last_close: HashMap<String, u64>,
 }
 
@@ -86,6 +88,14 @@ struct Card {
 #[derive(Serialize)]
 struct TranscriptPage {
     messages: Vec<Card>,
+    has_more: bool,
+}
+
+#[derive(Debug)]
+struct TranscriptSnapshot {
+    source: String,
+    version: String,
+    messages: Vec<transcript::Message>,
     has_more: bool,
 }
 
@@ -283,15 +293,18 @@ fn take_window(
     home: std::path::PathBuf,
     before: Option<u64>,
     limit: usize,
-) -> anyhow::Result<Option<(String, Vec<transcript::Message>, bool)>> {
+) -> anyhow::Result<Option<TranscriptSnapshot>> {
     let cached = {
-        let map = cache
+        let mut map = cache
             .lock()
             .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
         map.entries
-            .get(&key)
+            .get_mut(&key)
             .filter(|entry| entry.identity == identity)
-            .map(|entry| Arc::clone(&entry.transcript))
+            .map(|entry| {
+                entry.ticket = entry.ticket.max(ticket);
+                Arc::clone(&entry.transcript)
+            })
     };
     let entry = match cached {
         Some(entry) => entry,
@@ -310,12 +323,15 @@ fn take_window(
             {
                 return Ok(None);
             }
-            match map.entries.get(&key) {
+            match map.entries.get_mut(&key) {
                 Some(cached) if cached.ticket > ticket || cached.identity == identity => {
+                    cached.ticket = cached.ticket.max(ticket);
                     Arc::clone(&cached.transcript)
                 }
                 _ => {
                     let Some(entry) = resolved else {
+                        map.entries.remove(&key);
+                        record_close(&mut map, &key, ticket);
                         return Ok(None);
                     };
                     map.entries.insert(
@@ -351,9 +367,28 @@ fn take_window(
         }
         return Err(error);
     }
-    let version = transcript.version();
+    let map = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("transcript cache lock is poisoned"))?;
+    if map
+        .last_close
+        .get(&key)
+        .is_some_and(|closed| *closed > ticket)
+        || map
+            .entries
+            .get(&key)
+            .is_none_or(|cached| !Arc::ptr_eq(&cached.transcript, &entry))
+    {
+        return Ok(None);
+    }
+    drop(map);
     let (messages, has_more) = window(transcript.messages(), before, limit);
-    Ok(Some((version, messages.to_vec(), has_more)))
+    Ok(Some(TranscriptSnapshot {
+        source: transcript.source_id(),
+        version: transcript.version(),
+        messages: messages.to_vec(),
+        has_more,
+    }))
 }
 
 /// A pane whose agent this server cannot read answers 404: the phone reads that
@@ -398,7 +433,7 @@ async fn transcript_route(
         )
     })?
     .map_err(failed("could not read the transcript"))?;
-    let Some((version, messages, has_more)) = taken else {
+    let Some(snapshot) = taken else {
         if transcript::parsable(&agent) {
             return Ok(Json(TranscriptPage {
                 messages: Vec::new(),
@@ -409,23 +444,33 @@ async fn transcript_route(
         return Err((StatusCode::NOT_FOUND, "no transcript for this pane"));
     };
 
-    // The window is part of the identity: an ETag that named only the file's
-    // length would let a `before=` page answer 304 for content the phone has
-    // never held.
-    let etag = etag(&version, before, limit);
+    // Both the source and window matter: two sessions can have equal byte
+    // offsets, and a tail validator must not validate an earlier page.
+    let etag = etag(
+        &format!("{}:{}", snapshot.source, snapshot.version),
+        before,
+        limit,
+    );
+    let response_headers = [
+        (header::ETAG, etag.clone()),
+        (
+            header::HeaderName::from_static("x-transcript-id"),
+            snapshot.source,
+        ),
+    ];
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
         == Some(etag.as_str())
     {
-        return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
+        return Ok((StatusCode::NOT_MODIFIED, response_headers).into_response());
     }
 
     let page = TranscriptPage {
-        messages: messages.iter().map(card).collect(),
-        has_more,
+        messages: snapshot.messages.iter().map(card).collect(),
+        has_more: snapshot.has_more,
     };
-    Ok(([(header::ETAG, etag)], Json(page)).into_response())
+    Ok((response_headers, Json(page)).into_response())
 }
 
 #[derive(Serialize)]
@@ -498,7 +543,7 @@ async fn open(State(state): State<AppState>, Path(pane_id): Path<String>) -> Api
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Remember the newest close for a pane. Two closes can take their tickets in
+/// Remember the newest close or resolution miss. Observations can take tickets in
 /// one order and reach the cache lock in the other; overwriting would let the
 /// older one lower the tombstone, and a request holding a ticket between them
 /// would then pass the check and resurrect the entry it was meant to drop.
@@ -768,6 +813,9 @@ mod tests {
     use super::*;
     use std::io::Write as _;
 
+    // The fake Herdr socket is process-wide; its route tests share this lock.
+    static HERDR_SOCKET_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn scrollback_asks_herdr_to_unwrap() {
         assert_eq!(Source::Scrollback.as_herdr(), "recent_unwrapped");
@@ -858,20 +906,70 @@ mod tests {
         path
     }
 
-    fn blocking_codex_rollout(
+    fn cursor_identity() -> TranscriptIdentity {
+        TranscriptIdentity {
+            agent: "cursor".into(),
+            session_kind: Some("id".into()),
+            session_value: Some("reported".into()),
+            ..transcript_identity()
+        }
+    }
+
+    fn blocking_cursor_metadata(
         home: &std::path::Path,
     ) -> (
         std::sync::mpsc::Receiver<()>,
         std::sync::mpsc::Sender<()>,
         std::thread::JoinHandle<()>,
     ) {
-        let rollout = home
-            .join(".codex/sessions/2026/09/01")
-            .join("rollout-2026-09-01T00-00-00-session.jsonl");
-        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        let conversation = home.join(".cursor/chats/project/conversation");
+        std::fs::create_dir_all(&conversation).unwrap();
+        std::fs::write(
+            conversation.join("meta.json"),
+            r#"{"cwd":"/repo","hasConversation":true,"createdAtMs":1,"updatedAtMs":2}"#,
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(conversation.join("store.db")).unwrap();
+        connection
+            .execute_batch(
+                "create table blobs (id text primary key, data blob);\
+                 create table meta (key text primary key, value text);",
+            )
+            .unwrap();
+        let root_id = "00".repeat(32);
+        let message_id = "11".repeat(32);
+        let mut root = vec![0x0a_u8, 32];
+        root.extend([0x11; 32]);
+        connection
+            .execute(
+                "insert into blobs values (?1, ?2)",
+                rusqlite::params![root_id, root],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "insert into blobs values (?1, ?2)",
+                rusqlite::params![
+                    message_id,
+                    br#"{"role":"assistant","content":"Cursor conversation"}"#.as_slice()
+                ],
+            )
+            .unwrap();
+        let meta = serde_json::json!({ "latestRootBlobId": root_id }).to_string();
+        let encoded = meta
+            .bytes()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        connection
+            .execute("insert into meta values ('0', ?1)", [encoded])
+            .unwrap();
+        drop(connection);
+
+        let metadata = home.join(".cursor/chats/project/reported/meta.json");
+        std::fs::create_dir_all(metadata.parent().unwrap()).unwrap();
         assert!(
             std::process::Command::new("mkfifo")
-                .arg(&rollout)
+                .arg(&metadata)
                 .status()
                 .unwrap()
                 .success()
@@ -882,32 +980,38 @@ mod tests {
         let writer = std::thread::spawn(move || {
             let mut pipe = std::fs::OpenOptions::new()
                 .write(true)
-                .open(rollout)
+                .open(&metadata)
                 .unwrap();
+            // The first resolver now owns the FIFO inode. Later resolvers
+            // read the regular file at this pathname without blocking.
+            let meta = r#"{"createdAtMs":1}"#;
+            std::fs::remove_file(&metadata).unwrap();
+            std::fs::write(&metadata, meta).unwrap();
             opened_tx.send(()).unwrap();
             write_rx.recv().unwrap();
-            writeln!(
-                pipe,
-                "{}",
-                serde_json::json!({ "type": "session_meta",
-                                    "payload": { "cwd": "/repo" } })
-            )
-            .unwrap();
+            writeln!(pipe, "{meta}").unwrap();
         });
         (opened_rx, write_tx, writer)
     }
 
-    fn write_codex_meta(home: &std::path::Path, name: &str) {
-        let path = home.join(".codex/sessions/2026/09/01").join(name);
+    fn write_codex(home: &std::path::Path, id: &str, text: &str) -> std::path::PathBuf {
+        let path = home
+            .join(".codex/sessions/2026/09/01")
+            .join(format!("rollout-2026-09-01T00-00-00-{id}.jsonl"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
-            path,
+            &path,
             format!(
-                "{}\n",
-                serde_json::json!({ "type": "session_meta", "payload": { "cwd": "/repo" } })
+                "{}\n{}\n",
+                serde_json::json!({ "type": "session_meta", "payload": { "id": id, "cwd": "/repo" } }),
+                serde_json::json!({ "type": "response_item", "payload": {
+                    "type": "message", "role": "user",
+                    "content": [{ "type": "input_text", "text": text }]
+                } })
             ),
         )
         .unwrap();
+        path
     }
 
     fn newest_text(
@@ -925,7 +1029,7 @@ mod tests {
             30,
         )
         .unwrap()?
-        .1
+        .messages
         .first()
         .map(|message| message.text.clone())
     }
@@ -1045,7 +1149,7 @@ mod tests {
             30,
         );
 
-        assert!(matches!(result, Ok(None)), "{result:?}");
+        assert!(matches!(result, Ok(None)));
         assert!(!is_cached(&cache, "pane"));
     }
 
@@ -1243,15 +1347,12 @@ mod tests {
     fn concurrent_cold_requests_for_one_pane_both_receive_a_transcript() {
         let home = scratch_home("concurrent-cold-requests");
         let cache = Cache::default();
-        let identity = TranscriptIdentity {
-            agent: "codex".into(),
-            ..transcript_identity()
-        };
+        let identity = cursor_identity();
         let old_ticket = next_transcript_ticket();
         let old_cache = cache.clone();
         let old_identity = identity.clone();
         let old_home = home.clone();
-        let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
+        let (opened_rx, write_tx, writer) = blocking_cursor_metadata(&home);
         let old = std::thread::spawn(move || {
             take_window(
                 old_cache,
@@ -1267,7 +1368,6 @@ mod tests {
         opened_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
-        write_codex_meta(&home, "rollout-2026-09-01T01-00-00-new.jsonl");
         let newer = take_window(
             cache,
             "pane".into(),
@@ -1281,8 +1381,10 @@ mod tests {
         writer.join().unwrap();
         let older = old.join().unwrap();
 
-        assert!(older.unwrap().is_some());
-        assert!(newer.unwrap().is_some());
+        for result in [older, newer] {
+            let snapshot = result.unwrap().expect("both resolvers must succeed");
+            assert_eq!(snapshot.messages[0].text, "Cursor conversation");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1290,11 +1392,8 @@ mod tests {
         let home = scratch_home("close-during-resolution");
         let state = AppState::default();
         let worker_cache = state.transcripts.clone();
-        let identity = TranscriptIdentity {
-            agent: "codex".into(),
-            ..transcript_identity()
-        };
-        let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
+        let identity = cursor_identity();
+        let (opened_rx, write_tx, writer) = blocking_cursor_metadata(&home);
         let worker = std::thread::spawn(move || {
             take_window(
                 worker_cache,
@@ -1326,12 +1425,9 @@ mod tests {
         let home = scratch_home("superseded-resolution");
         let cache = Cache::default();
         let old_cache = cache.clone();
-        let old_identity = TranscriptIdentity {
-            agent: "codex".into(),
-            ..transcript_identity()
-        };
+        let old_identity = cursor_identity();
         let old_home = home.clone();
-        let (opened_rx, write_tx, writer) = blocking_codex_rollout(&home);
+        let (opened_rx, write_tx, writer) = blocking_cursor_metadata(&home);
         let old = std::thread::spawn(move || {
             take_window(
                 old_cache,
@@ -1356,8 +1452,535 @@ mod tests {
         write_tx.send(()).unwrap();
         writer.join().unwrap();
 
-        assert!(old.join().unwrap().unwrap().is_some());
+        let snapshot = old.join().unwrap().unwrap().unwrap();
+        assert_eq!(snapshot.messages[0].text, "new");
         assert!(cached_identity(&cache, "pane").as_ref() == Some(&new_identity));
+    }
+
+    #[test]
+    fn a_resolution_miss_invalidates_an_older_blocked_conversation() {
+        let home = scratch_home("miss-during-resolution");
+        let cache = Cache::default();
+        let old_cache = cache.clone();
+        let old_home = home.clone();
+        let old_ticket = next_transcript_ticket();
+        let (opened_rx, write_tx, writer) = blocking_cursor_metadata(&home);
+        let old = std::thread::spawn(move || {
+            take_window(
+                old_cache,
+                "pane".into(),
+                cursor_identity(),
+                old_ticket,
+                old_home,
+                None,
+                30,
+            )
+        });
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let miss_ticket = next_transcript_ticket();
+        let unresolved = TranscriptIdentity {
+            agent: "codex".into(),
+            ..transcript_identity()
+        };
+        let newest = take_window(
+            cache.clone(),
+            "pane".into(),
+            unresolved,
+            miss_ticket,
+            home,
+            None,
+            30,
+        );
+        write_tx.send(()).unwrap();
+        writer.join().unwrap();
+        let older = old.join().unwrap();
+
+        assert!(
+            newest.unwrap().is_none(),
+            "the no-ID observation must be empty"
+        );
+        assert!(
+            older.unwrap().is_none(),
+            "older Cursor conversation returned after a no-ID Codex miss"
+        );
+        assert!(!is_cached(&cache, "pane"));
+        assert_eq!(
+            cache.lock().unwrap().last_close.get("pane"),
+            Some(&miss_ticket)
+        );
+    }
+
+    fn snapshot_at(
+        cache: &Cache,
+        identity: &TranscriptIdentity,
+        ticket: u64,
+        home: &std::path::Path,
+    ) -> Option<TranscriptSnapshot> {
+        take_window(
+            cache.clone(),
+            "pane".into(),
+            identity.clone(),
+            ticket,
+            home.to_path_buf(),
+            None,
+            30,
+        )
+        .unwrap()
+    }
+
+    fn cached_codex_b(label: &str) -> (std::path::PathBuf, Cache, TranscriptIdentity) {
+        let home = scratch_home(label);
+        write_codex(&home, "b", "B");
+        let identity = TranscriptIdentity {
+            agent: "codex".into(),
+            session_kind: Some("id".into()),
+            session_value: Some("b".into()),
+            ..transcript_identity()
+        };
+        let cache = Cache::default();
+        assert_eq!(
+            snapshot_at(&cache, &identity, 10, &home).unwrap().messages[0].text,
+            "B"
+        );
+        (home, cache, identity)
+    }
+
+    fn assert_completed_cache_hit_survives(late_older_hit: bool) {
+        let (home, cache, identity) = cached_codex_b("completed-hit-before-miss");
+        let unresolved = TranscriptIdentity {
+            session_kind: None,
+            session_value: None,
+            ..identity.clone()
+        };
+        // Ticket 20 observed no ID, but reaches resolution after ticket 30.
+        let miss_ticket = 20;
+        assert_eq!(
+            snapshot_at(&cache, &identity, 30, &home).unwrap().messages[0].text,
+            "B"
+        );
+        if late_older_hit {
+            // An older identical observation cannot lower the accepted order.
+            assert_eq!(
+                snapshot_at(&cache, &identity, 15, &home).unwrap().messages[0].text,
+                "B"
+            );
+        }
+
+        snapshot_at(&cache, &unresolved, miss_ticket, &home);
+
+        let map = cache.lock().unwrap();
+        assert!(
+            map.entries.contains_key("pane"),
+            "ticket 20 evicted B confirmed by ticket 30; tombstone={:?}",
+            map.last_close.get("pane")
+        );
+        assert_eq!(map.last_close.get("pane"), None);
+        drop(map);
+        assert_eq!(
+            snapshot_at(&cache, &identity, 25, &home)
+                .expect("a stale miss must leave newer reads valid")
+                .messages[0]
+                .text,
+            "B"
+        );
+    }
+
+    #[test]
+    fn a_stale_miss_preserves_a_completed_cache_hit() {
+        assert_completed_cache_hit_survives(false);
+    }
+
+    #[test]
+    fn a_stale_miss_preserves_a_completed_hit_after_an_older_hit() {
+        assert_completed_cache_hit_survives(true);
+    }
+
+    #[test]
+    fn a_stale_miss_preserves_a_cache_hit_waiting_to_refresh() {
+        let (home, cache, identity) = cached_codex_b("blocked-hit-before-miss");
+        let unresolved = TranscriptIdentity {
+            session_kind: None,
+            session_value: None,
+            ..identity.clone()
+        };
+        let entry = Arc::clone(&cache.lock().unwrap().entries["pane"].transcript);
+        let held = entry.lock().unwrap();
+        let worker_cache = cache.clone();
+        let worker_home = home.clone();
+        let worker_identity = identity.clone();
+        let newer = std::thread::spawn(move || {
+            snapshot_at(&worker_cache, &worker_identity, 30, &worker_home)
+        });
+
+        // The extra Arc proves ticket 30 reused B and is waiting on its lock.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while Arc::strong_count(&entry) < 3 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "newer read did not enter"
+            );
+            std::thread::yield_now();
+        }
+        let miss_cache = cache.clone();
+        let miss_home = home.clone();
+        let miss =
+            std::thread::spawn(move || snapshot_at(&miss_cache, &unresolved, 20, &miss_home));
+        // A valid stale read may reuse B and wait too. A discarded read may
+        // finish directly. Both schedules let us release the lock without sleep.
+        while !miss.is_finished() && Arc::strong_count(&entry) < 4 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stale read did not enter"
+            );
+            std::thread::yield_now();
+        }
+        drop(held);
+        let newer = newer.join().unwrap();
+        miss.join().unwrap();
+
+        assert_eq!(
+            newer
+                .expect("ticket 30 must return B even when ticket 20 resolves during refresh")
+                .messages[0]
+                .text,
+            "B"
+        );
+        assert!(is_cached(&cache, "pane"));
+        assert_eq!(cache.lock().unwrap().last_close.get("pane"), None);
+        assert_eq!(
+            snapshot_at(&cache, &identity, 25, &home).unwrap().messages[0].text,
+            "B"
+        );
+    }
+
+    fn assert_identical_resolution_survives(resolving_ticket: u64) {
+        let home = scratch_home("identical-entry-after-resolution");
+        let cache = Cache::default();
+        let identity = cursor_identity();
+        let worker_cache = cache.clone();
+        let worker_home = home.clone();
+        let worker_identity = identity.clone();
+        let (opened_rx, write_tx, writer) = blocking_cursor_metadata(&home);
+        let resolving = std::thread::spawn(move || {
+            snapshot_at(
+                &worker_cache,
+                &worker_identity,
+                resolving_ticket,
+                &worker_home,
+            )
+        });
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let installed = snapshot_at(&cache, &identity, 10, &home);
+        let confirmed = if resolving_ticket < 30 {
+            snapshot_at(&cache, &identity, 30, &home)
+        } else {
+            None
+        };
+        write_tx.send(()).unwrap();
+        writer.join().unwrap();
+        let reused = resolving.join().unwrap();
+        for snapshot in [installed, reused] {
+            assert_eq!(snapshot.unwrap().messages[0].text, "Cursor conversation");
+        }
+        if resolving_ticket < 30 {
+            assert_eq!(confirmed.unwrap().messages[0].text, "Cursor conversation");
+        }
+        // Resolution reused an identical entry installed while it waited.
+        // It must both advance newer observations and preserve older maxima.
+        let unresolved = TranscriptIdentity {
+            agent: "codex".into(),
+            ..transcript_identity()
+        };
+        snapshot_at(&cache, &unresolved, 20, &home);
+
+        assert!(
+            is_cached(&cache, "pane"),
+            "ticket 20 evicted the conversation after ticket {resolving_ticket} reused it"
+        );
+        assert_eq!(cache.lock().unwrap().last_close.get("pane"), None);
+        assert_eq!(
+            snapshot_at(&cache, &identity, 25, &home).unwrap().messages[0].text,
+            "Cursor conversation"
+        );
+    }
+
+    #[test]
+    fn a_stale_miss_preserves_identical_entries_reused_after_resolution() {
+        assert_identical_resolution_survives(30);
+    }
+
+    #[test]
+    fn a_stale_miss_preserves_identical_entries_after_an_older_resolution() {
+        assert_identical_resolution_survives(15);
+    }
+
+    #[test]
+    fn a_codex_pane_can_move_from_a_known_session_through_no_id_to_another() {
+        let home = scratch_home("codex-session-transition");
+        write_codex(&home, "a", "A");
+        write_codex(&home, "b", "B");
+        let cache = Cache::default();
+        let identity = TranscriptIdentity {
+            agent: "codex".into(),
+            session_kind: Some("id".into()),
+            session_value: Some("a".into()),
+            ..transcript_identity()
+        };
+        assert_eq!(newest_text(&cache, &identity, &home).as_deref(), Some("A"));
+        let unresolved = TranscriptIdentity {
+            session_kind: None,
+            session_value: None,
+            ..identity.clone()
+        };
+        assert_eq!(newest_text(&cache, &unresolved, &home), None);
+        assert!(!is_cached(&cache, "pane"));
+        let next = TranscriptIdentity {
+            session_value: Some("b".into()),
+            ..identity
+        };
+        assert_eq!(newest_text(&cache, &next, &home).as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn a_snapshot_carries_source_revision_and_the_requested_window() {
+        let home = scratch_home("transcript-snapshot");
+        let path = write_claude(&home, "session.jsonl", "first");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({ "type": "user", "message": { "content": "second" } })
+        )
+        .unwrap();
+        drop(file);
+        let expected_source =
+            Transcript::open(line_source(path.canonicalize().unwrap())).source_id();
+        let cache = Cache::default();
+        let identity = transcript_identity();
+        let newest: TranscriptSnapshot = take_window(
+            cache.clone(),
+            "pane".into(),
+            identity.clone(),
+            next_transcript_ticket(),
+            home.clone(),
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(newest.source, expected_source);
+        assert!(!newest.version.is_empty());
+        assert_eq!(
+            newest.messages,
+            vec![transcript::Message {
+                seq: 1,
+                role: transcript::Role::User,
+                text: "second".into(),
+                output: None,
+            }]
+        );
+        assert!(newest.has_more);
+
+        let older: TranscriptSnapshot = take_window(
+            cache,
+            "pane".into(),
+            identity,
+            next_transcript_ticket(),
+            home,
+            Some(1),
+            30,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(older.source, newest.source);
+        assert_eq!(older.version, newest.version);
+        assert_eq!(
+            older.messages,
+            vec![transcript::Message {
+                seq: 0,
+                role: transcript::Role::User,
+                text: "first".into(),
+                output: None,
+            }]
+        );
+        assert!(!older.has_more);
+    }
+
+    fn transcript_context(identity: &TranscriptIdentity) -> &'static [u8] {
+        let session = identity
+            .session_kind
+            .as_ref()
+            .zip(identity.session_value.as_ref())
+            .map(|(kind, value)| {
+                serde_json::json!({
+                    "source": "test", "agent": identity.agent, "kind": kind, "value": value
+                })
+            });
+        let reply = serde_json::json!({
+            "id": "herdr-remote", "result": { "snapshot": {
+                "workspaces": [], "tabs": [], "panes": [{
+                    "pane_id": "pane", "tab_id": "tab", "agent": identity.agent,
+                    "agent_status": "idle", "cwd": identity.cwd, "title": identity.title,
+                    "agent_session": session
+                }]
+            } }
+        });
+        Box::leak(format!("{reply}\n").into_bytes().into_boxed_slice())
+    }
+
+    async fn transcript_response(state: &AppState, validator: Option<&str>) -> Response {
+        let mut headers = header::HeaderMap::new();
+        if let Some(validator) = validator {
+            headers.insert(header::IF_NONE_MATCH, validator.parse().unwrap());
+        }
+        transcript_route(
+            State(state.clone()),
+            Path("pane".into()),
+            Query(TranscriptWindow {
+                before: None,
+                limit: Some(30),
+            }),
+            headers,
+        )
+        .await
+        .unwrap_or_else(IntoResponse::into_response)
+    }
+
+    async fn transcript_body(response: Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn transcript_headers_keep_source_stable_while_the_revision_changes() {
+        let _socket_lock = HERDR_SOCKET_TEST.lock().await;
+        let home = scratch_home("transcript-headers");
+        let path = write_claude(&home, "session.jsonl", "A");
+        let identity = transcript_identity();
+        let state = AppState::default();
+        let cached = insert_cached(
+            &state.transcripts,
+            "pane",
+            &identity,
+            line_source(path.clone()),
+        );
+        let expected_source = cached.lock().unwrap().source_id();
+        let (socket, _requests) = herdr::fake_herdr(vec![transcript_context(&identity); 3]);
+        let _socket = herdr::use_test_socket(socket);
+
+        let first = transcript_response(&state, None).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let source = first
+            .headers()
+            .get("x-transcript-id")
+            .expect("resolved response needs a source")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let version = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert!(!source.is_empty());
+        assert_eq!(source, expected_source);
+        assert!(
+            !source.contains(home.to_str().unwrap()),
+            "source must be opaque"
+        );
+        assert_eq!(transcript_body(first).await["messages"][0]["preview"], "A");
+        assert_eq!(
+            transcript_response(&state, Some(&version)).await.status(),
+            StatusCode::NOT_MODIFIED
+        );
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({ "type": "user", "message": { "content": "B" } })
+        )
+        .unwrap();
+        drop(file);
+        let appended = transcript_response(&state, Some(&version)).await;
+        assert_eq!(appended.status(), StatusCode::OK);
+        assert_eq!(appended.headers()["x-transcript-id"], source);
+        assert_ne!(appended.headers()[header::ETAG], version);
+        let body = transcript_body(appended).await;
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(body["messages"][1]["preview"], "B");
+    }
+
+    #[tokio::test]
+    async fn equal_length_sources_do_not_share_an_http_etag() {
+        let _socket_lock = HERDR_SOCKET_TEST.lock().await;
+        let home = scratch_home("equal-length-etags");
+        let a = write_claude(&home, "a.jsonl", "A");
+        let b = write_claude(&home, "b.jsonl", "B");
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().len(),
+            std::fs::metadata(&b).unwrap().len()
+        );
+        let identity = transcript_identity();
+        let state = AppState::default();
+        let (socket, _requests) = herdr::fake_herdr(vec![transcript_context(&identity); 2]);
+        let _socket = herdr::use_test_socket(socket);
+
+        insert_cached(&state.transcripts, "pane", &identity, line_source(a));
+        let first = transcript_response(&state, None).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let validator = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+        let first_source = first.headers().get("x-transcript-id").cloned();
+        assert_eq!(transcript_body(first).await["messages"][0]["preview"], "A");
+
+        insert_cached(&state.transcripts, "pane", &identity, line_source(b));
+        let second = transcript_response(&state, Some(&validator)).await;
+        assert_eq!(
+            second.status(),
+            StatusCode::OK,
+            "another source must return its body even at the same revision"
+        );
+        assert_ne!(second.headers()[header::ETAG], validator);
+        let second_source = second.headers().get("x-transcript-id");
+        assert!(first_source.is_some() && second_source.is_some());
+        assert_ne!(second_source, first_source.as_ref());
+        assert_eq!(transcript_body(second).await["messages"][0]["preview"], "B");
+    }
+
+    #[tokio::test]
+    async fn unresolved_supported_agents_have_empty_pages_without_source_or_etag() {
+        let _socket_lock = HERDR_SOCKET_TEST.lock().await;
+        let home = scratch_home("unresolved-response");
+        for agent in ["claude", "codex", "grok", "cursor"] {
+            let identity = TranscriptIdentity {
+                agent: agent.into(),
+                session_kind: Some("path".into()),
+                session_value: Some(home.join("missing.jsonl").to_str().unwrap().into()),
+                ..transcript_identity()
+            };
+            let (socket, _requests) = herdr::fake_herdr(vec![transcript_context(&identity)]);
+            let _socket = herdr::use_test_socket(socket);
+            let response = transcript_response(&AppState::default(), Some("\"stale\"")).await;
+            assert_eq!(response.status(), StatusCode::OK, "{agent}");
+            assert!(
+                !response.headers().contains_key("x-transcript-id"),
+                "{agent}"
+            );
+            assert!(!response.headers().contains_key(header::ETAG), "{agent}");
+            assert_eq!(
+                transcript_body(response).await,
+                serde_json::json!({ "messages": [], "has_more": false })
+            );
+        }
     }
 
     #[test]
@@ -1463,6 +2086,7 @@ mod tests {
     /// is the whole process's, so two tests holding one at a time would race.
     #[tokio::test]
     async fn open_moves_the_zoom_only_where_herdr_has_not_already() {
+        let _socket_lock = HERDR_SOCKET_TEST.lock().await;
         let reply = b"{\"id\":\"herdr-remote\",\"result\":{}}\n";
         let snapshot = Box::leak(zoom_snapshot("w1:p1").into_boxed_slice());
 
@@ -1597,6 +2221,7 @@ mod tests {
 
     #[tokio::test]
     async fn responses_are_hardened() {
+        let _socket_lock = HERDR_SOCKET_TEST.lock().await;
         use tower::ServiceExt;
         let allowed = Allowed(Arc::new(allowed_hosts("127.0.0.1", "8787", None)));
         let request = |method: &str, path: &str, origin: Option<&str>| {

@@ -13,6 +13,12 @@
   </head>
   <body>
     <header>
+      <button id="workspaces" type="button" hidden aria-label="Select workspace"
+              aria-haspopup="dialog" aria-controls="workspace-picker">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+        </svg>
+      </button>
       <a id="back" href="/" hidden aria-label="Back">
         <svg viewBox="0 0 24 24" aria-hidden="true"
           ><path d="m12 19-7-7 7-7" /><path d="M19 12H5"
@@ -26,6 +32,18 @@
         /></svg>
       </button>
     </header>
+
+    <dialog id="workspace-picker" aria-labelledby="workspace-heading">
+      <div class="picker-heading">
+        <h2 id="workspace-heading">Select workspace</h2>
+        <button id="workspace-close" type="button" aria-label="Close workspace picker">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+          </svg>
+        </button>
+      </div>
+      <div id="workspace-list"></div>
+    </dialog>
 
     <noscript>This page needs JavaScript to list panes and send prompts.</noscript>
     <p id="status" role="status"></p>
@@ -187,10 +205,9 @@
         following,
         modalContent,
         prepend,
-        replaceTail,
+        receivePage,
         type Sent,
         sentCard,
-        settle,
       } from "../lib/transcript";
 
       const listEl = document.querySelector<HTMLDivElement>("#list")!;
@@ -199,6 +216,9 @@
       const statusEl = document.querySelector<HTMLParagraphElement>("#status")!;
       const headingEl = document.querySelector<HTMLHeadingElement>("#heading")!;
       const backEl = document.querySelector<HTMLAnchorElement>("#back")!;
+      const workspacesEl = document.querySelector<HTMLButtonElement>("#workspaces")!;
+      const workspacePickerEl = document.querySelector<HTMLDialogElement>("#workspace-picker")!;
+      const workspaceListEl = document.querySelector<HTMLDivElement>("#workspace-list")!;
       const composerEl = document.querySelector<HTMLFormElement>("#composer")!;
       const targetEl = document.querySelector<HTMLLabelElement>("#target")!;
       const textEl = document.querySelector<HTMLTextAreaElement>("#text")!;
@@ -219,6 +239,10 @@
 
       let cards: Card[] = [];
       let sent: Sent[] = [];
+      let source: string | undefined;
+      // A first source belongs to sends made while waiting for it. Leaving a
+      // pane or a known source starts a new lifetime for action completions.
+      let conversation = 0;
       let paintedCards: Card[] = [];
       let paintedSent: Sent[] = [];
       /** What the list is showing: the transcript's own cards, then whatever
@@ -459,7 +483,7 @@
 
       // Neither sheet is modal, so neither gets Escape handling of its own.
       addEventListener("keydown", (event) => {
-        if (event.key !== "Escape") return;
+        if (event.key !== "Escape" || workspacePickerEl.open) return;
         if (fullEl.open) fullEl.close();
         if (screenEl.open) screenEl.close();
       });
@@ -545,6 +569,29 @@
         );
       }
 
+      function paintWorkspaces() {
+        const focused = workspaceListEl.querySelector<HTMLAnchorElement>("a:focus")?.pathname;
+        workspaceListEl.replaceChildren(...(session?.workspaces.map(workspaceRow) ?? []));
+        if (focused) {
+          const link = [...workspaceListEl.querySelectorAll<HTMLAnchorElement>("a")]
+            .find((candidate) => candidate.pathname === focused);
+          (link ?? document.querySelector<HTMLButtonElement>("#workspace-close")!).focus();
+        }
+      }
+
+      workspacesEl.addEventListener("click", () => {
+        paintWorkspaces();
+        workspacePickerEl.showModal();
+      });
+      document.querySelector<HTMLButtonElement>("#workspace-close")!
+        .addEventListener("click", () => workspacePickerEl.close());
+      workspacePickerEl.addEventListener("click", (event) => {
+        if (event.target !== workspacePickerEl) return;
+        const box = workspacePickerEl.getBoundingClientRect();
+        if (event.clientX < box.left || event.clientX > box.right ||
+            event.clientY < box.top || event.clientY > box.bottom) workspacePickerEl.close();
+      });
+
       function tabRow(workspace: Workspace, tab: Tab) {
         const count = tab.panes.length === 1 ? "1 pane" : `${tab.panes.length} panes`;
         return row(
@@ -571,9 +618,12 @@
 
       async function watch(pane: Pane | null) {
         const token = ++watches;
+        conversation += 1;
+        say("");
         clearTimeout(timer);
         if (watching && watching !== pane?.id) closePane(watching);
         watching = pane?.id ?? null;
+        source = undefined;
         cards = [];
         sent = [];
         paintedCards = [];
@@ -639,14 +689,29 @@
           parkMore(true);
           logEl.hidden = true;
           if (page !== "unchanged") {
-            cards = replaceTail(cards, page.messages);
-            sent = settle(sent, cards);
+            if (source !== page.source) {
+              if (source !== undefined) {
+                conversation += 1;
+                say("");
+              }
+              fullEl.close();
+              screenEl.close();
+            }
+            ({ source, cards, sent } = receivePage({ source, cards, sent }, page));
             paintCards();
             moreEl.hidden = !page.has_more;
           }
         } else {
           // Raw output: an agent pane keeps the visible screen, whose redraw history
           // does not churn, and a shell keeps its scrollback.
+          if (source !== undefined) {
+            conversation += 1;
+            say("");
+            source = undefined;
+            sent = [];
+            fullEl.close();
+            screenEl.close();
+          }
           cards = [];
           transcriptEl.hidden = true;
           emptyEl.hidden = true;
@@ -709,6 +774,7 @@
           ? paneTitle(pane)
           : (tab?.label ?? workspace?.label ?? "Herdr Remote");
         backEl.hidden = !workspace;
+        workspacesEl.hidden = !workspace;
         backEl.href = pane
           ? href({ workspaceId: workspace!.id, tabId: tab!.id })
           : tab
@@ -737,6 +803,7 @@
                 : session.workspaces.map(workspaceRow)),
           );
         }
+        textEl.autocapitalize = pane?.agent ? "sentences" : "none";
         if ((pane?.id ?? null) !== watching) {
           void watch(pane);
           if (pane) textEl.focus();
@@ -792,8 +859,15 @@
       }
 
       function go(path: string, replace = false) {
+        closeDialogs();
         history[replace ? "replaceState" : "pushState"]({}, "", path);
         render();
+      }
+
+      function closeDialogs() {
+        workspacePickerEl.close();
+        fullEl.close();
+        screenEl.close();
       }
 
       async function load() {
@@ -820,6 +894,7 @@
             sessionJson = json;
             session = fresh;
             render();
+            if (workspacePickerEl.open) paintWorkspaces();
           }
         } catch (error) {
           sessionFailed = true;
@@ -851,23 +926,30 @@
         go(link.pathname);
       });
 
-      window.addEventListener("popstate", render);
+      window.addEventListener("popstate", () => {
+        closeDialogs();
+        render();
+      });
 
       /** The action buttons differ only in what they send. */
       async function act(
         button: HTMLButtonElement,
         what: string,
         run: (paneId: string) => Promise<void>,
+        done?: () => void,
       ) {
         const pane = current().pane;
         if (!pane || button.disabled) return;
+        const context = conversation;
         button.disabled = true;
         say(`${what}…`);
         try {
           await run(pane.id);
+          if (context !== conversation) return;
+          done?.();
           say("");
         } catch (error) {
-          complain(error, `Could not send ${what}.`);
+          if (context === conversation) complain(error, `Could not send ${what}.`);
         } finally {
           // render() restores each button from the pane's current state,
           // including the stop/clear presentation.
@@ -882,16 +964,20 @@
         );
       });
       goEl.addEventListener("click", () =>
-        act(goEl, "go", async (id) => {
-          await sendPrompt(id, "go");
-          remember("go");
-        }),
+        act(
+          goEl,
+          "go",
+          (id) => sendPrompt(id, "go"),
+          () => remember("go"),
+        ),
       );
       pushEl.addEventListener("click", () =>
-        act(pushEl, "don't stop until completion", async (id) => {
-          await sendPrompt(id, "don't stop until completion");
-          remember("don't stop until completion");
-        }),
+        act(
+          pushEl,
+          "don't stop until completion",
+          (id) => sendPrompt(id, "don't stop until completion"),
+          () => remember("don't stop until completion"),
+        ),
       );
       upEl.addEventListener("click", () =>
         act(upEl, "up", (id) => pressArrow(id, "up")),
@@ -915,12 +1001,16 @@
           act(sendEl, "Enter", (id) => pressEnter(id));
           return;
         }
-        act(sendEl, "message", async (id) => {
-          await sendPrompt(id, text);
-          textEl.value = "";
-          syncSend();
-          remember(text);
-        });
+        act(
+          sendEl,
+          "message",
+          (id) => sendPrompt(id, text),
+          () => {
+            textEl.value = "";
+            syncSend();
+            remember(text);
+          },
+        );
       });
 
       // Reading further back keeps the reader where they are: paint() only
@@ -937,9 +1027,11 @@
           return;
         }
         const oldest = cards[0]?.seq;
+        const requestedSource = source;
         const page = await fetchTranscript(paneId, oldest);
         if (token !== watches || paneId !== watching) return;
         if (page === null || page === "unchanged") return;
+        if (source !== requestedSource || page.source !== source) return;
         const fromBottom = transcriptEl.scrollHeight - transcriptEl.scrollTop;
         cards = prepend(page.messages, cards);
         paintCards();
@@ -1290,12 +1382,53 @@
       /* The veil covers what the sheet took over and stops at the controls.
          A non-modal dialog paints no backdrop of its own, so this is all of
          it. */
-      body:has(dialog[open])::after {
+      body:has(#full[open], #screen[open])::after {
         position: fixed;
         inset: 0 0 var(--composer-h, 9rem);
         z-index: 9;
         background: rgb(0 0 0 / 0.55);
         content: "";
+      }
+      #workspace-picker {
+        box-sizing: border-box;
+        width: min(32rem, calc(100% - 2rem));
+        max-height: calc(100dvh - 2rem);
+        padding: 1rem;
+        border: 1px solid var(--edge);
+        border-radius: 0.5rem;
+        background: Canvas;
+        color: inherit;
+        overscroll-behavior: contain;
+      }
+      #workspace-picker::backdrop {
+        background: rgb(0 0 0 / 0.55);
+      }
+      /* This shortcut remains reachable above either nonmodal pane sheet. */
+      #workspaces {
+        position: relative;
+        z-index: 11;
+        background: Canvas;
+      }
+      .picker-heading {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
+      #workspace-heading {
+        flex: 1;
+        margin: 0;
+        font-size: 1rem;
+      }
+      #workspace-close {
+        display: grid;
+        place-items: center;
+        min-width: 36px;
+        min-height: 36px;
+        border: 0;
+        background: none;
+        color: inherit;
+        cursor: pointer;
       }
       /* The close control floats over the foot of the sheet; the padding is
          the room it needs, inside the scroller so the end of a long message
@@ -1577,11 +1710,13 @@
          a deliberate trade for a header that does not dominate a phone screen.
          Fixed height so the pair matches whatever it holds. */
       #refresh svg,
+      #workspaces svg,
       #back svg {
         width: 14px;
         height: 14px;
       }
       #refresh,
+      #workspaces,
       #back {
         box-sizing: border-box;
         display: grid;
@@ -1596,6 +1731,7 @@
       }
       /* Older WebViews do not mark the UA [hidden] rule !important. */
       #more[hidden],
+      #workspaces[hidden],
       #back[hidden],
       #list[hidden],
       #log[hidden] {

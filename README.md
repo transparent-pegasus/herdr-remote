@@ -59,8 +59,16 @@ one — because a pane running on the alternate screen keeps no scrollback, so i
 answers exist nowhere else. The path comes from herdr's `agent_session`, which any process
 on the herdr socket can report, so the server canonicalizes it and requires that agent's
 own root (`~/.claude/projects`, `~/.codex/sessions`, `~/.cursor/chats`,
-`~/.grok/sessions`) and that agent's own file shape. Anything else resolves to "no
-transcript" and the pane falls back to `output`, which is also what a shell pane gets.
+`~/.grok/sessions`) and that agent's own file shape. Codex requires its reported session
+ID or a guarded transcript path; a shared working directory never identifies its history.
+A supported agent awaiting its transcript has an empty history. Shells and unsupported
+agents use `output`. Cursor's reader accepts the session metadata alongside its message
+references and rejects malformed or truncated records.
+
+Resolved transcript responses carry an opaque `x-transcript-id`. It also scopes the ETag,
+so two sessions of equal length cannot validate each other's content. A source change
+clears the phone's previous cards, queued copies, and expanded message; a late request
+for an earlier page cannot bring that history back.
 `?source=scrollback` asks herdr for `recent_unwrapped`, so a line longer than the pane is
 wide arrives whole instead of pre-broken at the pane's width.
 
@@ -74,10 +82,16 @@ while that page is open and in the foreground, with the composer aimed at it. An
 pane shows its transcript as cards clamped to three lines, each opening the whole message
 in a dialog, with a one-row live band beneath carrying the unsent draft, a hammer while
 the pane is working, and a button that shows the raw screen — where a model picker or a
-permission prompt lives, since neither ever reaches the transcript. Any pane without a
-resolvable transcript shows the raw log instead. So anything
+permission prompt lives, since neither ever reaches the transcript. Supported agents
+without an identifiable transcript show empty history. So anything
 outside `/api` that is not a file in `web/dist` is answered with `index.html`,
 and an unknown `/api` path still 404s instead of handing a fetch a page of HTML.
+
+The Lucide folder button immediately left of Back opens a workspace selection modal.
+It is hidden on `/`; elsewhere, choosing a workspace opens its tabs. The picker supports
+Escape and Close, keeps its list current, and remains accessible over either pane sheet.
+The composer disables automatic capitalization for shell panes and restores sentence
+capitalization for agents.
 
 `prompt` picks its Herdr call per pane: `agent.prompt` where an agent is attached,
 otherwise `pane.send_input` with a trailing `enter`. `open` and `close` call `pane.zoom`:

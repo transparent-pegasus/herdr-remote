@@ -68,6 +68,7 @@ mod tests {
     }
 }
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 
@@ -82,14 +83,14 @@ pub struct PaneRef<'a> {
     pub title: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
     Claude,
     Codex,
     Grok,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Source {
     /// One JSON object per line, appended as the session runs.
     Lines { path: PathBuf, format: Format },
@@ -174,25 +175,19 @@ pub fn resolve(pane: &PaneRef, home: &Path) -> Option<Source> {
         }
         "codex" => {
             let sessions = home.join(".codex/sessions");
-            // A codex pane reports no session id until it has taken a turn, so
-            // the id is an optimization; the rollout's own `session_meta` names
-            // the cwd and is the fallback. A pane that never ran has no rollout
-            // at all, which correctly resolves to no transcript.
-            let path = match pane.session_value {
-                Some(id) => {
-                    let wanted = format!("-{id}.jsonl");
-                    files(&sessions, 4)
-                        .into_iter()
-                        .filter(|path| {
-                            path.file_name()
-                                .and_then(|n| n.to_str())
-                                .is_some_and(|name| name.ends_with(&wanted))
-                        })
-                        .max()
-                }
-                None => newest_rollout_for(&sessions, pane.cwd),
-            }
-            .and_then(|path| guard("codex", path, home))?;
+            // Several sessions can share a cwd. Until this pane reports its
+            // own identity, none of those rollouts is known to belong to it.
+            let id = pane.session_value.filter(|id| !id.is_empty())?;
+            let wanted = format!("-{id}.jsonl");
+            let path = files(&sessions, 4)
+                .into_iter()
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|name| name.ends_with(&wanted))
+                })
+                .max()
+                .and_then(|path| guard("codex", path, home))?;
             Some(Source::Lines {
                 path,
                 format: Format::Codex,
@@ -402,36 +397,6 @@ fn cursor_store(
         }
     }
     best.map(|(_, _, path)| path)
-}
-
-/// Codex names its rollouts after a timestamp and a session id, never after the
-/// directory it ran in; the cwd lives in the file's first line.
-fn newest_rollout_for(sessions: &Path, cwd: &str) -> Option<PathBuf> {
-    let mut rollouts: Vec<PathBuf> = files(sessions, 4)
-        .into_iter()
-        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-        .collect();
-    // The name starts with an ISO timestamp, so sorting by it is sorting by
-    // start time without opening anything.
-    rollouts.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-    rollouts.into_iter().find(|path| {
-        first_line(path)
-            .and_then(|line| {
-                let meta: serde_json::Value = serde_json::from_str(&line).ok()?;
-                Some(meta.get("payload")?.get("cwd")?.as_str()? == cwd)
-            })
-            .unwrap_or(false)
-    })
-}
-
-/// `session_meta` is the first line, and a rollout can reach tens of megabytes;
-/// reading the whole file to look at its head would undo the cache this feeds.
-fn first_line(path: &Path) -> Option<String> {
-    let mut line = String::new();
-    BufReader::new(std::fs::File::open(path).ok()?)
-        .read_line(&mut line)
-        .ok()?;
-    Some(line)
 }
 
 #[cfg(test)]
@@ -737,12 +702,12 @@ mod resolution_tests {
     }
 
     #[test]
-    fn a_codex_pane_without_an_id_matches_its_rollout_by_cwd() {
+    fn a_codex_pane_without_an_id_does_not_borrow_a_rollout_by_cwd() {
         let home = scratch();
         let sessions = home.join(".codex/sessions/2026/09/01");
         std::fs::create_dir_all(&sessions).unwrap();
         for (name, cwd) in [
-            ("rollout-2026-09-01T01-00-00-aaa.jsonl", "/other"),
+            ("rollout-2026-09-01T01-00-00-aaa.jsonl", "/repo"),
             ("rollout-2026-09-01T02-00-00-bbb.jsonl", "/repo"),
         ] {
             std::fs::write(
@@ -755,12 +720,48 @@ mod resolution_tests {
             )
             .unwrap();
         }
-        match resolve(&pane("codex", None, "/repo"), &home).unwrap() {
-            Source::Lines { path, format } => {
-                assert_eq!(format, Format::Codex);
-                assert!(path.to_string_lossy().ends_with("-bbb.jsonl"), "{path:?}");
-            }
-            other => panic!("{other:?}"),
+        for id in [None, Some(""), Some("unknown")] {
+            assert_eq!(
+                resolve(&pane("codex", id, "/repo"), &home),
+                None,
+                "id: {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_codex_id_cannot_match_a_rollout_with_no_id_suffix() {
+        let home = scratch();
+        touch(&home.join(".codex/sessions/2026/09/01/rollout-2026-09-01T00-00-00-.jsonl"));
+        assert_eq!(resolve(&pane("codex", Some(""), "/repo"), &home), None);
+    }
+
+    #[test]
+    fn a_codex_reported_path_requires_its_own_root_and_file_shape() {
+        let home = scratch();
+        let path = home.join(".codex/sessions/2026/09/01/rollout-session.jsonl");
+        touch(&path);
+        let mut reported = pane("codex", path.to_str(), "/elsewhere");
+        reported.session_kind = Some("path");
+        assert_eq!(
+            resolve(&reported, &home),
+            Some(Source::Lines {
+                path: path.canonicalize().unwrap(),
+                format: Format::Codex
+            })
+        );
+
+        for refused in [
+            home.join("outside/rollout-session.jsonl"),
+            home.join(".claude/projects/-repo/session.jsonl"),
+            home.join(".codex/sessions/settings.json"),
+        ] {
+            touch(&refused);
+            let refused_pane = PaneRef {
+                session_value: refused.to_str(),
+                ..reported
+            };
+            assert_eq!(resolve(&refused_pane, &home), None);
         }
     }
 
@@ -826,6 +827,13 @@ impl Transcript {
 
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Distinguishes conversations without exposing the local transcript path.
+    pub fn source_id(&self) -> String {
+        let mut hash = DefaultHasher::new();
+        self.source.hash(&mut hash);
+        format!("{:016x}", hash.finish())
     }
 
     /// What the response's ETag carries. Same value means the phone already has
@@ -970,6 +978,75 @@ mod cache_tests {
         assert_eq!(transcript.messages().len(), 2);
         assert_eq!(transcript.messages()[1].seq, 1);
         assert_ne!(transcript.version(), after_first);
+    }
+
+    #[test]
+    fn source_identity_survives_appends_and_reopening_while_version_changes() {
+        let path = scratch_file();
+        append(&path, &user("first"));
+        let source = Source::Lines {
+            path: path.clone(),
+            format: Format::Claude,
+        };
+        let mut transcript = Transcript::open(source.clone());
+        transcript.refresh().unwrap();
+        let identity = transcript.source_id();
+        let version = transcript.version();
+        assert!(!identity.is_empty());
+        assert!(
+            !identity.contains(path.to_str().unwrap()),
+            "source must be opaque"
+        );
+
+        append(&path, &user("second"));
+        transcript.refresh().unwrap();
+        assert_eq!(transcript.source_id(), identity);
+        assert_ne!(transcript.version(), version);
+        let mut reopened = Transcript::open(source);
+        reopened.refresh().unwrap();
+        assert_eq!(reopened.source_id(), identity);
+        assert_eq!(reopened.version(), transcript.version());
+    }
+
+    #[test]
+    fn equal_length_files_have_distinct_source_ids_at_the_same_version() {
+        let a = scratch_file();
+        let b = a.with_file_name("other.jsonl");
+        append(&a, &user("A"));
+        append(&b, &user("B"));
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().len(),
+            std::fs::metadata(&b).unwrap().len()
+        );
+        let mut a = Transcript::open(Source::Lines {
+            path: a,
+            format: Format::Claude,
+        });
+        let mut b = Transcript::open(Source::Lines {
+            path: b,
+            format: Format::Claude,
+        });
+        a.refresh().unwrap();
+        b.refresh().unwrap();
+        assert_eq!(a.messages()[0].text, "A");
+        assert_eq!(b.messages()[0].text, "B");
+        assert_eq!(a.version(), b.version());
+        assert_ne!(a.source_id(), b.source_id());
+    }
+
+    #[test]
+    fn source_identity_includes_the_format_even_for_the_same_path() {
+        let path = scratch_file();
+        std::fs::write(&path, []).unwrap();
+        let mut identities = std::collections::HashSet::new();
+        for format in [Format::Claude, Format::Codex, Format::Grok] {
+            let transcript = Transcript::open(Source::Lines {
+                path: path.clone(),
+                format,
+            });
+            assert!(identities.insert(transcript.source_id()));
+        }
+        assert!(identities.insert(Transcript::open(Source::CursorDb { path }).source_id()));
     }
 
     /// The point of the offset: a line already parsed is never read again. If

@@ -1,5 +1,11 @@
 # Transcript View Implementation Plan
 
+> Updated behavior, 2026-09-05: the Codex cwd fallback and its fixtures below are
+> superseded by explicit session identity. Supported agents awaiting a source show
+> empty history. Source identity now scopes response validators and client history;
+> Cursor roots may contain metadata alongside message references. The implementation
+> listings below remain the historical plan; current behavior is described in the design.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use pane-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Show an agent pane's own transcript file as a conversation-only history with three-line cards and a full-text modal, keep the live terminal screen as a small separate band, and stop losing history to the alternate screen and to pane-width wrapping.
