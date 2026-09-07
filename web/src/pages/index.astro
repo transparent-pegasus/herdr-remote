@@ -208,6 +208,7 @@
         receivePage,
         type Sent,
         sentCard,
+        settle,
       } from "../lib/transcript";
 
       const listEl = document.querySelector<HTMLDivElement>("#list")!;
@@ -325,16 +326,11 @@
         transcriptEl.scrollTop = follow ? transcriptEl.scrollHeight : top;
       }
 
-      /** Keep our own copy of what we just sent, against the transcript as it
-       *  stands, so it can be shown until the agent's file catches up. Only a
-       *  working pane queues: an agent that is not mid-turn takes the message
-       *  straight into its own file, and drawing a card for it would be showing
-       *  the same message twice. `-1`, not `0`, for a transcript we hold none
-       *  of: the first message a file ever holds is seq 0, and `after: 0` would
-       *  wait for a sequence that never arrives. */
-      function remember(text: string) {
-        if (current().pane?.state !== "working") return;
-        sent = [...sent, { after: cards.at(-1)?.seq ?? -1, text }];
+      /** Hold a successful mid-turn send against the history from before the
+       *  request. A poll may already have read it while we awaited the reply. */
+      function remember(text: string, after: number | undefined) {
+        if (after === undefined) return;
+        sent = settle([...sent, { after, text }], cards);
         paintCards();
         // Sending is deliberate, so it goes to the end of the list whatever
         // paintCards decided from where the reader had scrolled to.
@@ -946,17 +942,18 @@
         button: HTMLButtonElement,
         what: string,
         run: (paneId: string) => Promise<void>,
-        done?: () => void,
+        done?: (after: number | undefined) => void,
       ) {
         const pane = current().pane;
         if (!pane || button.disabled) return;
         const context = conversation;
+        const after = pane.state === "working" ? (cards.at(-1)?.seq ?? -1) : undefined;
         button.disabled = true;
         say(`${what}…`);
         try {
           await run(pane.id);
           if (context !== conversation) return;
-          done?.();
+          done?.(after);
           say("");
         } catch (error) {
           if (context === conversation) complain(error, `Could not send ${what}.`);
@@ -978,7 +975,7 @@
           goEl,
           "go",
           (id) => sendPrompt(id, "go"),
-          () => remember("go"),
+          (after) => remember("go", after),
         ),
       );
       pushEl.addEventListener("click", () =>
@@ -986,7 +983,7 @@
           pushEl,
           "don't stop until completion",
           (id) => sendPrompt(id, "don't stop until completion"),
-          () => remember("don't stop until completion"),
+          (after) => remember("don't stop until completion", after),
         ),
       );
       upEl.addEventListener("click", () =>
@@ -1015,10 +1012,10 @@
           sendEl,
           "message",
           (id) => sendPrompt(id, text),
-          () => {
+          (after) => {
             textEl.value = "";
             syncSend();
-            remember(text);
+            remember(text, after);
           },
         );
       });

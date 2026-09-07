@@ -69,6 +69,9 @@ Resolved transcript responses carry an opaque `x-transcript-id`. It also scopes 
 so two sessions of equal length cannot validate each other's content. A source change
 clears the phone's previous cards, queued copies, and expanded message; a late request
 for an earlier page cannot bring that history back.
+Mid-turn sends remain dimmed until their user turn appears in the transcript. The
+queue records the history position before sending, so a turn read while the send
+request is still in flight also settles its pending copy when the request succeeds.
 `?source=scrollback` asks herdr for `recent_unwrapped`, so a line longer than the pane is
 wide arrives whole instead of pre-broken at the pane's width.
 
