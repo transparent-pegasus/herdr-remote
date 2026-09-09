@@ -89,6 +89,30 @@ test("a new source discards every old card even when its window starts at seq 10
 	});
 });
 
+test("a clear fence rejects only delayed pages from the cleared source", () => {
+	const cleared = {
+		source: undefined,
+		cards: [],
+		sent: [],
+		clearedSource: "A",
+	};
+	const delayed: Page = {
+		source: "A",
+		messages: [card(1)],
+		has_more: false,
+	};
+
+	expect(receivePage(cleared, delayed)).toBe(cleared);
+	const replacement = { ...card(0), preview: "new conversation" };
+	expect(
+		receivePage(cleared, {
+			source: "B",
+			messages: [replacement],
+			has_more: false,
+		}),
+	).toEqual({ source: "B", cards: [replacement], sent: [] });
+});
+
 test("A to unresolved to B drops old sends and preserves input typed while unresolved", () => {
 	const state: TranscriptState = {
 		source: "A",

@@ -17,7 +17,13 @@ export type Page = {
 	source?: string;
 };
 
-export type TranscriptState = { source?: string; cards: Card[]; sent: Sent[] };
+export type TranscriptState = {
+	source?: string;
+	cards: Card[];
+	sent: Sent[];
+	/** A confirmed clear retires this source until polling sees it gone or replaced. */
+	clearedSource?: string;
+};
 
 export function agentRawState(screen?: string):
 	| {
@@ -163,11 +169,18 @@ export function settle(sent: Sent[], cards: Card[]): Sent[] {
 }
 
 /** A source change replaces the conversation, including loaded earlier pages.
- *  Input typed while awaiting a source still belongs to the incoming session. */
+ *  Input typed while awaiting a source still belongs to the incoming session.
+ *  A source retired by clear is ignored until it disappears or is replaced. */
 export function receivePage(
 	state: TranscriptState,
 	page: Page,
 ): TranscriptState {
+	if (
+		state.clearedSource !== undefined &&
+		page.source === state.clearedSource
+	) {
+		return state;
+	}
 	const changed = state.source !== page.source;
 	const cards = replaceTail(changed ? [] : state.cards, page.messages);
 	const sent = changed && state.source ? [] : state.sent;

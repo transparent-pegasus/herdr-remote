@@ -242,6 +242,7 @@
       let cards: Card[] = [];
       let sent: Sent[] = [];
       let source: string | undefined;
+      let clearedSource: string | undefined;
       // A first source belongs to sends made while waiting for it. Leaving a
       // pane or a known source starts a new lifetime for action completions.
       let conversation = 0;
@@ -630,6 +631,7 @@
         if (watching && watching !== pane?.id) closePane(watching);
         watching = pane?.id ?? null;
         source = undefined;
+        clearedSource = undefined;
         cards = [];
         sent = [];
         paintedCards = [];
@@ -703,9 +705,11 @@
               fullEl.close();
               screenEl.close();
             }
-            ({ source, cards, sent } = receivePage({ source, cards, sent }, page));
+            const before = { source, cards, sent, clearedSource };
+            const received = receivePage(before, page);
+            ({ source, cards, sent, clearedSource } = received);
             paintCards();
-            moreEl.hidden = !page.has_more;
+            if (received !== before) moreEl.hidden = !page.has_more;
           }
         } else {
           // Raw output: an agent pane keeps the visible screen, whose redraw history
@@ -938,11 +942,24 @@
       });
 
       /** The action buttons differ only in what they send. */
+      function clearTranscript(paneId: string) {
+        conversation += 1;
+        clearedSource ??= source;
+        source = undefined;
+        cards = [];
+        sent = [];
+        forgetPane(paneId);
+        fullEl.close();
+        screenEl.close();
+        moreEl.hidden = true;
+        paintCards();
+      }
+
       async function act(
         button: HTMLButtonElement,
         what: string,
         run: (paneId: string) => Promise<void>,
-        done?: (after: number | undefined) => void,
+        done?: (after: number | undefined, paneId: string) => void,
       ) {
         const pane = current().pane;
         if (!pane || button.disabled) return;
@@ -953,7 +970,7 @@
         try {
           await run(pane.id);
           if (context !== conversation) return;
-          done?.(after);
+          done?.(after, pane.id);
           say("");
         } catch (error) {
           if (context === conversation) complain(error, `Could not send ${what}.`);
@@ -966,8 +983,14 @@
 
       stopEl.addEventListener("click", () => {
         const stop = stopPresentation(current().pane?.state ?? "");
-        return act(stopEl, stop.label, (id) =>
-          stop.interrupts ? interruptPane(id) : sendPrompt(id, "/clear"),
+        return act(
+          stopEl,
+          stop.label,
+          (id) =>
+            stop.interrupts ? interruptPane(id) : sendPrompt(id, "/clear"),
+          stop.interrupts
+            ? undefined
+            : (_, paneId) => clearTranscript(paneId),
         );
       });
       goEl.addEventListener("click", () =>

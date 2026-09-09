@@ -68,7 +68,9 @@ references and rejects malformed or truncated records.
 Resolved transcript responses carry an opaque `x-transcript-id`. It also scopes the ETag,
 so two sessions of equal length cannot validate each other's content. A source change
 clears the phone's previous cards, queued copies, and expanded message; a late request
-for an earlier page cannot bring that history back.
+for an earlier page cannot bring that history back. A confirmed `/clear` clears those
+cards immediately and fences its retired source, so a delayed newest-page response
+cannot restore the cleared conversation while Codex switches sessions.
 Mid-turn sends remain dimmed until their user turn appears in the transcript. The
 queue records the history position before sending, so a turn read while the send
 request is still in flight also settles its pending copy when the request succeeds.
